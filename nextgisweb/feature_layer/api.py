@@ -2,15 +2,19 @@
 from __future__ import unicode_literals
 import json
 import unicodecsv as csv
+import mapbox_vector_tile
 from collections import OrderedDict
 from datetime import date, time, datetime
 from StringIO import StringIO
 
 import geojson
+from math import pi
 from shapely import wkt
 from pyramid.response import Response
 
 from ..resource import DataScope, resource_factory
+from ..models import DBSession
+from ..vector_layer import VectorLayer
 
 from .interface import IFeatureLayer, IWritableFeatureLayer, FIELD_TYPE
 from .feature import Feature
@@ -88,6 +92,96 @@ def view_csv(request):
     return Response(
         buf.getvalue(), content_type=b'text/csv',
         content_disposition=content_disposition)
+
+
+def view_mvt(request):
+    # Эксперимент с Mapbox Vector Tile.
+    # Используется функци PostGIS ST_ClipByBox2D, доступная в версии 2.2.
+    # http://javisantana.com/2015/03/22/vector-tiles.html
+    # https://github.com/mapzen/mapbox-vector-tile
+    request.resource_permission(PERM_READ)
+    resource = request.context
+
+    # TODO: Добавить перепроецирование в 3857
+    assert resource.srs_id == 3857
+    assert isinstance(resource, VectorLayer)
+
+    mvt_extent = 4096
+    mvt_layer = dict(name=str(resource.id), features=[])
+
+    tile_zxy = (int(request.matchdict['z']),
+                int(request.matchdict['x']),
+                int(request.matchdict['y']))
+
+    tile_extent = resource.srs.tile_extent(tile_zxy)
+    minx, miny, maxx, maxy = tile_extent
+
+    # Увеличиваем охват запрашиваемой области на 5% с каждой стороны,
+    # чтобы избежать возможных артефактов на границах тайлов,
+    # также это позволит корректно отображать точечные данные
+    tile_extent_padded = (minx - (maxx - minx)*0.05,
+                          miny - (maxy - miny)*0.05,
+                          maxx + (maxx - minx)*0.05,
+                          maxy + (maxy - miny)*0.05)
+    minxp, minyp, maxxp, maxyp = tile_extent_padded
+
+    # Параметры аффинного преобразования
+    dx = -minx
+    dy = -miny
+    resx = mvt_extent / (maxx - minx)
+    resy = mvt_extent / (maxy - miny)
+
+    props = [('id', 'id')]
+    if request.env.feature_layer.settings.get('mvt.attributes'):
+        props += [('fld_%s' % f.fld_uuid, f.keyname) for f in resource.fields]
+
+    props_sql = ','.join(['%s AS "%s"' % (fld, label) for (fld, label) in props])
+    props_fld = ','.join(['"%s"' % prop[1] for prop in props])
+    keynames = [prop[1] for prop in props]
+
+    resolutions = [6378137 * 2 * pi / (2 ** (z + 8)) for z in range(20)]
+
+    # TODO: ST_SnapToGrid?
+    # TODO: ST_Simplify (определить величину упрощения)
+    query = """
+        WITH _geom AS (
+            SELECT %(props_sql)s,
+                   ST_ClipByBox2d(
+                       ST_Simplify(
+                           geom,
+                           %(resolution)f/2
+                       ),
+                       ST_MakeEnvelope(%(minxp)f, %(minyp)f,
+                                       %(maxxp)f, %(maxyp)f)
+                   ) AS _clip_geom
+            FROM vector_layer.%(tbl_uuid)s
+            WHERE geom && ST_MakeEnvelope(%(minxp)f, %(minyp)f,
+                                          %(maxxp)f, %(maxyp)f)
+        )
+        SELECT %(props_fld)s, ST_AsBinary(
+            ST_Affine(_clip_geom, %(resx)f, 0, 0, %(resy)f,
+                      %(resx)f*%(dx)f, %(resy)f*%(dy)f)
+        ) AS geom
+        FROM _geom
+        WHERE NOT ST_IsEmpty(_clip_geom)
+    """ % dict(dx=dx, dy=dy, resx=resx, resy=resy,
+               minxp=minxp, minyp=minyp, maxxp=maxxp, maxyp=maxyp,
+               resolution=resolutions[tile_zxy[0]],
+               tbl_uuid=request.context._tablename,
+               props_sql=props_sql, props_fld=props_fld)
+
+    rows = DBSession.connection().execute(query)
+    for feature in rows:
+        properties = dict()
+        geom = str(feature['geom'])
+        for key in keynames:
+            properties[key] = feature[key]
+        mvt_layer['features'].append(dict(geometry=geom,
+                                          properties=properties))
+
+    return Response(
+        mapbox_vector_tile.encode([mvt_layer]),
+        content_type=b'application/vnd.mapbox-vector-tile')
 
 
 def deserialize(feat, data):
@@ -286,6 +380,12 @@ def setup_pyramid(comp, config):
         'feature_layer.csv', '/api/resource/{id}/csv',
         factory=resource_factory) \
         .add_view(view_csv, context=IFeatureLayer, request_method='GET')
+
+    config.add_route(
+        'feature_layer.mvt', '/api/resource/{id}/{z:\d+}/{x:\d+}/{y:\d+}.mvt',
+        factory=resource_factory) \
+        .add_view(view_mvt, context=IFeatureLayer, request_method='GET',
+                  http_cache=3600)
 
     config.add_route(
         'feature_layer.feature.item', '/api/resource/{id}/feature/{fid}',

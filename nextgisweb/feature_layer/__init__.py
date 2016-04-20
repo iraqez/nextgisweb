@@ -24,6 +24,8 @@ class FeatureLayerComponent(Component):
     def initialize(self):
         self.settings['identify.attributes'] = \
             self.settings.get('identify.attributes', 'true').lower() == 'true'
+        self.settings['mvt.attributes'] = \
+            self.settings.get('mvt.attributes', 'false').lower() == 'true'
 
         from .extension import FeatureExtension
         self.FeatureExtension = FeatureExtension
@@ -36,4 +38,5 @@ class FeatureLayerComponent(Component):
 
     settings_info = (
         dict(key='identify.attributes', desc=u"Показывать атрибуты в идентификации"),
+        dict(key='mvt.attributes', desc=u"Включать атрибуты в векторные тайлы"),
     )
