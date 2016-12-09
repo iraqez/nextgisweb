@@ -82,6 +82,7 @@ class WebMapItem(Base):
     parent_id = db.Column(db.Integer, db.ForeignKey('webmap_item.id'))
     item_type = db.Column(db.Enum('root', 'group', 'layer'), nullable=False)
     position = db.Column(db.Integer, nullable=True)
+    keyname = db.Column(db.Unicode, nullable=True)
     display_name = db.Column(db.Unicode, nullable=True)
     group_expanded = db.Column(db.Boolean, nullable=True)
     layer_style_id = db.Column(db.ForeignKey(Resource.id), nullable=True)
@@ -118,6 +119,7 @@ class WebMapItem(Base):
                 return dict(
                     item_type=self.item_type,
                     display_name=self.display_name,
+                    keyname=self.keyname,
                     group_expanded=self.group_expanded,
                     children=[i.to_dict() for i in children],
                 )
@@ -126,6 +128,7 @@ class WebMapItem(Base):
             return dict(
                 item_type=self.item_type,
                 display_name=self.display_name,
+                keyname=self.keyname,
                 layer_enabled=self.layer_enabled,
                 layer_transparency=self.layer_transparency,
                 layer_style_id=self.layer_style_id,
@@ -145,7 +148,7 @@ class WebMapItem(Base):
 
         for a in ('display_name', 'group_expanded', 'layer_enabled',
                   'layer_adapter', 'layer_style_id', 'layer_transparency',
-                  'layer_min_scale_denom', 'layer_max_scale_denom'):
+                  'layer_min_scale_denom', 'layer_max_scale_denom', 'keyname'):
 
             if a in data:
                 setattr(self, a, data[a])

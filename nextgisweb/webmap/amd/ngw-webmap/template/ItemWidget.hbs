@@ -59,9 +59,15 @@
                     <div data-dojo-type="dojox/layout/TableContainer"
                         data-dojo-props="labelWidth: 150">
 
+
                         <div data-dojo-attach-point="widgetItemDisplayNameLayer"
                             data-dojo-type="ngw-pyramid/form/DisplayNameTextBox"
                             title="{{gettext 'Display name'}}" style="width: 100%"></div>
+
+                        <div data-dojo-attach-point="widgetItemKeyname"
+                            data-dojo-type="ngw-pyramid/form/KeynameTextBox"
+                            data-dojo-props="required: false"
+                            title="{{gettext 'Keyname'}}" style="width: 100%"></div>
 
                         <div data-dojo-attach-point="wdgtItemLayerEnabled" 
                             data-dojo-type="dijit/form/CheckBox"
@@ -105,6 +111,10 @@
                         <div data-dojo-attach-point="widgetItemDisplayNameGroup"
                             data-dojo-type="ngw-pyramid/form/DisplayNameTextBox"
                             title="{{gettext 'Display name'}}" style="width: 100%"></div>
+
+                        <div data-dojo-attach-point="widgetItemKeynameGroup"
+                            data-dojo-type="ngw-pyramid/form/DisplayNameTextBox"
+                            title="{{gettext 'Keyname'}}" style="width: 100%"></div>
 
                         <div data-dojo-attach-point="widgetItemGroupExpanded"
                             data-dojo-type="dijit/form/CheckBox"

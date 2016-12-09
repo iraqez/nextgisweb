@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nextgisweb 0.0\n"
 "Report-Msgid-Bugs-To: info@nextgis.ru\n"
-"POT-Creation-Date: 2016-12-05 09:52+0700\n"
+"POT-Creation-Date: 2016-12-09 11:56+0700\n"
 "PO-Revision-Date: 2015-09-14 15:48+0300\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: ru\n"
@@ -179,32 +179,37 @@ msgstr "Добавить слой"
 msgid "Remove"
 msgstr "Удалить"
 
-#: amd/ngw-webmap/template/ItemWidget.hbs:64
-#: amd/ngw-webmap/template/ItemWidget.hbs:107
+#: amd/ngw-webmap/template/ItemWidget.hbs:65
+#: amd/ngw-webmap/template/ItemWidget.hbs:113
 msgid "Display name"
 msgstr "Наименование"
 
-#: amd/ngw-webmap/template/ItemWidget.hbs:68
+#: amd/ngw-webmap/template/ItemWidget.hbs:70
+#: amd/ngw-webmap/template/ItemWidget.hbs:117
+msgid "Keyname"
+msgstr "Ключ"
+
+#: amd/ngw-webmap/template/ItemWidget.hbs:74
 msgid "Enabled"
 msgstr "Включен"
 
-#: amd/ngw-webmap/template/ItemWidget.hbs:75
+#: amd/ngw-webmap/template/ItemWidget.hbs:81
 msgid "Transparency"
 msgstr "Прозрачность"
 
-#: amd/ngw-webmap/template/ItemWidget.hbs:80
+#: amd/ngw-webmap/template/ItemWidget.hbs:86
 msgid "Min scale"
 msgstr "Мин. масштаб"
 
-#: amd/ngw-webmap/template/ItemWidget.hbs:85
+#: amd/ngw-webmap/template/ItemWidget.hbs:91
 msgid "Max scale"
 msgstr "Макс. масштаб"
 
-#: amd/ngw-webmap/template/ItemWidget.hbs:91
+#: amd/ngw-webmap/template/ItemWidget.hbs:97
 msgid "Adapter"
 msgstr "Адаптер"
 
-#: amd/ngw-webmap/template/ItemWidget.hbs:111
+#: amd/ngw-webmap/template/ItemWidget.hbs:121
 msgid "Expanded"
 msgstr "Развернута"
 
