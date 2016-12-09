@@ -126,6 +126,7 @@ define([
                 this.layerPicker.pick().then(lang.hitch(this, function (itm) {
                     this.itemStore.newItem({
                             "item_type": "layer",
+                            "keyname": itm.keyname,
                             "display_name": itm.display_name,
                             "layer_style_id": itm.id,
                             "layer_enabled": false,
