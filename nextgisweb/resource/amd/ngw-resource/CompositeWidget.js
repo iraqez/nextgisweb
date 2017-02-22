@@ -372,7 +372,7 @@ define([
                 method: "PUT"
             }).then(
                 /* callback */ lang.hitch(this, function () {
-                    this.unlock();
+                    window.location = route.resource.show({id: this.id});
                 }),
                 /* errback  */ lang.hitch(this, this.unlock)
             );
