@@ -22,7 +22,16 @@ def download(resource, request):
     ).one()
 
     fn = env.file_storage.filename(obj.fileobj)
-    return FileResponse(fn, content_type=bytes(obj.mime_type), request=request)
+
+    response = FileResponse(fn, content_type=bytes(obj.mime_type), request=request)
+
+    file_name = obj.name
+    for ch in '\\/:*?"<>|':
+        file_name = file_name.replace(ch, '')
+    response.content_disposition = (u'attachment; filename="%s"' % file_name).encode('utf-8')
+
+    return response
+
 
 
 def image(resource, request):
