@@ -5,6 +5,7 @@ define([
     "dojo/store/Memory",
     "dojo/request/xhr",
     "dojo/json",
+    "dojo/topic",
     "dijit/CheckedMenuItem",
     "dijit/ConfirmDialog",
     "openlayers/ol",
@@ -18,6 +19,7 @@ define([
     Memory,
     xhr,
     json,
+    topic,
     CheckedMenuItem,
     ConfirmDialog,
     ol,
@@ -52,7 +54,6 @@ define([
 
                     if (item) {
                         item.checked = this.checked;
-                        plugin.interactionsSetup(plugin.itemId);
                     } else {
                         item = {
                             id: plugin.itemId,
@@ -114,6 +115,7 @@ define([
                         plugin.store.put(item);
                     }
 
+                    plugin.interactionsSetup(plugin.itemId);
                     plugin.item = item;
                     if (!item.checked) {
                         finish.show();
@@ -124,6 +126,7 @@ define([
             this.display.watch("item", function (attr, oldVal, newVal) {
                 var itemConfig = plugin.display.get("itemConfig");
                 plugin.menuItem.set("disabled", !(itemConfig.type == "layer" &&
+                    itemConfig.plugin[plugin.identity] &&
                     itemConfig.plugin[plugin.identity].writable));
              
                 plugin.itemId = itemConfig.layerId;
@@ -169,6 +172,13 @@ define([
         },
 
         interactionsSetup: function (id) {
+            if (this.store.get(id) &&
+                this.store.get(id).checked) {
+                topic.publish("webmap/tool/identify/off");
+            } else {
+                topic.publish("webmap/tool/identify/on");
+            }
+
             this.store.query().forEach(function (item) {
                 item.interactions.forEach(function (interaction) {
                     interaction.setActive(item.id === id && item.checked);
