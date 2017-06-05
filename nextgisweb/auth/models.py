@@ -164,7 +164,7 @@ class Group(Principal):
             return user is not None
 
         else:
-            return user in self.members
+            return any([user.compare(member) for member in self.members])
 
     def serialize(self):
         return OrderedDict((
