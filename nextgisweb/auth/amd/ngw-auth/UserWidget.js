@@ -59,11 +59,11 @@ define([
             var result = { isValid: true, error: [] };
 
             array.forEach([this.displayName, this.keyname, this.password], function (subw) {
-                // форсируем показ значка при проверке
+                // force icon display when checking
                 subw._hasBeenBlurred = true;
                 subw.validate();
 
-                // если есть ошибки, фиксируем их
+                // if there're errors, mark them
                 if (!subw.isValid()) {
                     result.isValid = false;
                 }
@@ -75,8 +75,8 @@ define([
         _setValueAttr: function (value) {
             this.displayName.set("value", value.display_name);
             this.keyname.set("value", value.keyname);
-            this.cbSuperuser.set("checked", value.superuser);
             this.cbDisabled.set("checked", value.disabled);
+            this.cbSuperuser.set("checked", value.superuser);
             this.description.set("value", value.description);
 
             // show groups where user is a member at the top of the list

@@ -9,6 +9,8 @@
 
    component
    resource
+   error
    i18n
+   test
    file_upload
    snippets

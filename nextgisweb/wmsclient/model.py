@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
-import urllib
 import requests
 import json
 from io import BytesIO
@@ -12,6 +11,7 @@ from lxml import etree
 import PIL
 from owslib.wms import WebMapService
 from owslib.map.common import WMSCapabilitiesReader
+from pyramid.url import urlencode
 
 from .. import db
 from ..env import env
@@ -182,13 +182,21 @@ class Layer(Base, Resource, SpatialLayerMixin):
 
     def render_image(self, extent, size):
         query = dict(
-            service="WMS", request="GetMap",
+            service="WMS",
+            request="GetMap",
             version=self.connection.version,
-            layers=self.wmslayers, styles="",
+            layers=self.wmslayers,
+            styles="",
             format=self.imgformat,
-            bbox=','.join(map(str, extent)),
-            width=size[0], height=size[1],
-            transparent="true")
+            bbox=",".join(map(str, extent)),
+            width=size[0],
+            height=size[1],
+            transparent="true",
+        )
+
+        # Vendor-specific parameters
+        for p in self.vendor_params:
+            query[p.key] = p.value
 
         # In the GetMap operation the srs parameter is called crs in 1.3.0.
         srs = 'crs' if self.connection.version == '1.3.0' else 'srs'
@@ -205,11 +213,64 @@ class Layer(Base, Resource, SpatialLayerMixin):
         # ArcGIS server requires that space is url-encoded as "%20"
         # but it does not accept space encoded as "+".
         # It is always safe to replace spaces with "%20".
-        url = self.connection.url + sep + \
-            urllib.urlencode(query).replace("+", "%20")
+        url = (
+            self.connection.url
+            + sep
+            + urlencode(query).replace("+", "%20")
+        )
 
         return PIL.Image.open(BytesIO(requests.get(
             url, auth=auth, headers=env.wmsclient.headers).content))
+
+
+class LayerVendorParam(Base):
+    __tablename__ = 'wmsclient_layer_vendor_param'
+
+    resource_id = db.Column(db.ForeignKey(Resource.id), primary_key=True)
+    key = db.Column(db.Unicode(255), primary_key=True)
+    value = db.Column(db.Unicode)
+
+    resource = db.relationship(Resource, backref=db.backref(
+        'vendor_params', cascade='all, delete-orphan'))
+
+
+class _vendor_params_attr(SP):
+
+    def getter(self, srlzr):
+        result = {}
+
+        for itm in getattr(srlzr.obj, 'vendor_params'):
+            result[itm.key] = itm.value
+
+        return result
+
+    def setter(self, srlzr, value):
+        odata = getattr(srlzr.obj, 'vendor_params')
+
+        rml = []     # Records to be removed
+        imap = {}    # Records to be rewritten
+
+        for i in odata:
+            if i.key in value and value[i.key] is not None:
+                imap[i.key] = i
+            else:
+                rml.append(i)
+
+        # Remove records to be removed
+        map(lambda i: odata.remove(i), rml)
+
+        for k, val in value.iteritems():
+            if val is None:
+                continue
+
+            itm = imap.get(k)
+
+            if itm is None:
+                # Create new record if there is no record to rewrite
+                itm = LayerVendorParam(key=k)
+                odata.append(itm)
+
+            itm.value = val
 
 
 DataScope.read.require(
@@ -228,3 +289,5 @@ class LayerSerializer(Serializer):
     wmslayers = SP(**_defaults)
     imgformat = SP(**_defaults)
     srs = SR(**_defaults)
+
+    vendor_params = _vendor_params_attr(**_defaults)

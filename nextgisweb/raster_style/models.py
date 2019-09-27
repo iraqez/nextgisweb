@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals, print_function, absolute_import
 import numpy
-from osgeo import gdal_array
 import PIL
+
+from osgeo import gdal_array
+from pkg_resources import resource_filename
 from zope.interface import implements
+from StringIO import StringIO
 
 from ..models import declarative_base
 from ..resource import Resource, DataScope
 from ..render import (
     IRenderableStyle,
+    ILegendableStyle,
     IExtentRenderRequest,
     ITileRenderRequest)
 
@@ -39,7 +43,7 @@ class RasterStyle(Base, Resource):
 
     __scope__ = DataScope
 
-    implements(IRenderableStyle)
+    implements(IRenderableStyle, ILegendableStyle)
 
     @classmethod
     def check_parent(cls, parent):
@@ -63,6 +67,8 @@ class RasterStyle(Base, Resource):
         off_y = int((extent[3] - gt[3]) / gt[5])
         width_x = int(((extent[2] - gt[0]) / gt[1]) - off_x)
         width_y = int(((extent[1] - gt[3]) / gt[5]) - off_y)
+        width_x = max(width_x, 1)
+        width_y = max(width_y, 1)
 
         # check that pixels are not outside of image extent
         target_width, target_height = size
@@ -118,3 +124,15 @@ class RasterStyle(Base, Resource):
         result.paste(wnd, (offset_left, offset_top))
 
         return result
+
+    def render_legend(self):
+        # Don't use real preview of raster layer as icon
+        # because it may be slow
+        raster_icon = resource_filename('nextgisweb',
+                                        'raster_style/iconRaster.png')
+        img = PIL.Image.open(raster_icon)
+        buf = StringIO()
+        img.save(buf, 'png')
+        buf.seek(0)
+
+        return buf

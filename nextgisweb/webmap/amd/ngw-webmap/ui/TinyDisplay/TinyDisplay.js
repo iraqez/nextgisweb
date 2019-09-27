@@ -16,19 +16,14 @@ define([
     "openlayers/ol",
     "ngw/openlayers/Map",
     "dijit/registry",
-    "dijit/form/DropDownButton",
-    "dijit/DropDownMenu",
-    "dijit/MenuItem",
     "dijit/layout/ContentPane",
     "dijit/form/ToggleButton",
     "dijit/Dialog",
-    "dijit/form/TextBox",
     "dojo/dom-style",
     "dojo/store/JsonRest",
     "dojo/request/xhr",
     "dojo/data/ItemFileWriteStore",
-    "cbtree/models/TreeStoreModel",
-    "cbtree/Tree",
+    "dojo/topic",
     "ngw/route",
     "ngw-pyramid/i18n!webmap",
     "ngw-pyramid/hbs-i18n",
@@ -36,29 +31,27 @@ define([
     "../../tool/Base",
     "../../tool/Zoom",
     "../../tool/Measure",
+    "../../tool/Identify",
+    "ngw-webmap/MapStatesObserver",
+    "ngw-webmap/FeatureHighlighter",
     // settings
     "ngw/settings!webmap",
-    "../LinkToMainMap/LinkToMainMap",
+    "ngw-webmap/controls/LinkToMainMap",
     "dijit/layout/TabContainer",
     "dijit/layout/BorderContainer",
     "dijit/layout/ContentPane",
     "dojox/layout/TableContainer",
-    "dijit/Toolbar",
-    "dijit/form/Button",
-    "dijit/form/Select",
-    "dijit/form/DropDownButton",
-    "dijit/ToolbarSeparator",
-    "../NgwShareButtons/NgwShareButtons",
     // css
     "xstyle/css!" + ngwConfig.amdUrl + "cbtree/themes/claro/claro.css",
-    "xstyle/css!" + ngwConfig.amdUrl + "openlayers/ol.css"
+    "xstyle/css!" + ngwConfig.amdUrl + "openlayers/ol.css",
+    "xstyle/css!../../template/resources/Display.css",
+    "xstyle/css!./TinyDisplay.css"
 ], function (
     declare, _WidgetBase, _TemplatedMixin, _WidgetsInTemplateMixin, template,
     lang, array, Deferred, all, number, aspect, ioQuery, domConstruct, ol,
-    Map, registry, DropDownButton, DropDownMenu, MenuItem, ContentPane,
-    ToggleButton, Dialog, TextBox, domStyle, JsonRest, xhr, ItemFileWriteStore,
-    TreeStoreModel, Tree, route, i18n, hbsI18n, ToolBase,
-    ToolZoom, ToolMeasure, clientSettings, LinkToMainMap
+    Map, registry, ContentPane, ToggleButton, Dialog, domStyle, JsonRest, xhr, ItemFileWriteStore, topic,
+    route, i18n, hbsI18n, ToolBase, ToolZoom, ToolMeasure, Identify, MapStatesObserver,
+    FeatureHighlighter, clientSettings, LinkToMainMap
 ) {
 
     var CustomItemFileWriteStore = declare([ItemFileWriteStore], {
@@ -227,13 +220,6 @@ define([
                 function () { widget._itemStorePrepare(); }
             );
 
-            // Модель
-            this.itemModel = new TreeStoreModel({
-                store: this.itemStore,
-                checkedAttr: "checked",
-                query: { type: "root" }
-            });
-
             this.displayProjection = "EPSG:3857";
             this.lonlatProjection = "EPSG:4326";
 
@@ -246,19 +232,27 @@ define([
                 this.displayProjection
             );
 
-            // Дерево элементов слоя
-            this.itemTree = new Tree({
-                style: "height: 100%",
-                model: this.itemModel,
-                autoExpand: true,
-                showRoot: false
-            });
-
-            // Размещаем дерево, когда виджет будет готов
             all([this._layersDeferred, this._postCreateDeferred]).then(
-                function () {
-                    //widget.itemTree.placeAt(widget.layerTreePane);
-                }
+                lang.hitch(this, function () {
+                    var featureHighlighter = new FeatureHighlighter(this.map),
+                        featureHighlighterPromise,
+                        extent;
+
+                    if (this._urlParams.feature_id && this._urlParams.layer_id) {
+                        featureHighlighterPromise = featureHighlighter.highlightFeatureById(
+                            this._urlParams.feature_id,
+                            this._urlParams.layer_id
+                        );
+
+                        if (this._urlParams.zoom_to === 'true') {
+                            featureHighlighterPromise.then(lang.hitch(this, function (feature) {
+                                extent = feature.getGeometry().getExtent();
+                                this.map.olMap.getView().fit(extent);
+                            }));
+                        }
+                    }
+
+                })
             ).then(undefined, function (err) { console.error(err); });
 
             // Загружаем закладки, когда кнопка будет готова
@@ -267,15 +261,6 @@ define([
                     //widget.loadBookmarks();
                 }
             ).then(undefined, function (err) { console.error(err); });
-
-            // Выбранный элемент
-            this.itemTree.watch("selectedItem", function (attr, oldVal, newVal) {
-                widget.set(
-                    "itemConfig",
-                    widget._itemConfigById[widget.itemStore.getValue(newVal, "id")]
-                );
-                widget.set("item", newVal);
-            });
 
             // Карта
             all([this._midDeferred.basemap, this._midDeferred.webmapPlugin, this._startupDeferred]).then(
@@ -337,110 +322,18 @@ define([
                 }
             ).then(undefined, function (err) { console.error(err); });
 
-            // Свернем те элементы дерева, которые не отмечены как развернутые.
-            // По-умолчанию все элементы развернуты за счет autoExpand у itemTree
-            all([this._itemStoreDeferred, widget.itemTree.onLoadDeferred]).then(
-                function () {
-                    widget.itemStore.fetch({
-                        queryOptions: { deep: true },
-                        onItem: function (item) {
-                            var node = widget.itemTree.getNodesByItem(item)[0],
-                                config = widget._itemConfigById[widget.itemStore.getValue(item, "id")];
-                            if (node && config.type === "group" && !config.expanded) {
-                                node.collapse();
-                            }
-                        }
-                    });
-                }
-            ).then(undefined, function (err) { console.error(err); });
-
-
             // Инструменты
             this.tools = [];
         },
 
         postCreate: function () {
             this.inherited(arguments);
-
-            // Модифицируем TabContainer так, чтобы он показывал табы только
-            // в том случае, если их больше одного, т.е. один таб не показываем
-            //declare.safeMixin(this.tabContainer, {
-            //    updateTabVisibility: function () {
-            //        var currstate = domStyle.get(this.tablist.domNode, "display") != "none",
-            //            newstate = this.getChildren().length > 1;
-            //
-            //        if (currstate && !newstate) {
-            //            // Скрываем панель с табами
-            //            domStyle.set(this.tablist.domNode, "display", "none");
-            //            this.resize();
-            //        } else if (!currstate && newstate) {
-            //            // Показываем панель с табами
-            //            domStyle.set(this.tablist.domNode, "display", "block");
-            //            this.resize();
-            //        }
-            //    },
-            //
-            //    addChild: function () {
-            //        this.inherited(arguments);
-            //        this.updateTabVisibility();
-            //    },
-            //    removeChild: function () {
-            //        this.inherited(arguments);
-            //        this.updateTabVisibility();
-            //    },
-            //    startup: function () {
-            //        this.inherited(arguments);
-            //        this.updateTabVisibility();
-            //    }
-            //});
-
-            if (this._urlParams.linkMainMap === 'true') {
-                var linkToMainMap = new LinkToMainMap(mainDisplayUrl);
-                domConstruct.place(linkToMainMap.domNode, this.mapNode);
-            }
-
             this._postCreateDeferred.resolve();
         },
 
         startup: function () {
             this.inherited(arguments);
-
-            this.itemTree.startup();
-
             this._startupDeferred.resolve();
-        },
-
-        addTool: function (tool) {
-            if (!this.mapToolbar) {
-                return false;
-            }
-
-            var btn = new ToggleButton({
-                label: tool.label,
-                showLabel: false,
-                iconClass: tool.iconClass
-            }).placeAt(this.mapToolbar);
-
-            tool.toolbarBtn = btn;
-
-            this.tools.push(tool);
-
-            var display = this;
-            btn.watch("checked", function (attr, oldVal, newVal) {
-                if (newVal) {
-                    // При включении инструмента все остальные инструменты
-                    // выключаем, а этот включаем
-                    array.forEach(display.tools, function (t) {
-                        if (t != tool && t.toolbarBtn.get("checked")) {
-                            t.toolbarBtn.set("checked", false);
-                        }
-                    });
-                    tool.activate();
-                } else {
-                    // При выключении остальные инструменты не трогаем
-                    tool.deactivate();
-                }
-            });
         },
 
         loadBookmarks: function () {
@@ -566,38 +459,49 @@ define([
             this.map = new Map({
                 target: this.mapNode,
                 controls: [
-                    new ol.control.Rotate({
-                        tipLabel: i18n.gettext("Reset rotation")
-                    }),
                     new ol.control.Zoom({
+                        zoomInLabel: domConstruct.create("span", {
+                            class: "ol-control__icon material-icons",
+                            innerHTML: "add"
+                        }),
+                        zoomOutLabel: domConstruct.create("span", {
+                            class: "ol-control__icon material-icons",
+                            innerHTML: "remove"
+                        }),
                         zoomInTipLabel: i18n.gettext("Zoom in"),
-                        zoomOutTipLabel: i18n.gettext("Zoom out")
+                        zoomOutTipLabel: i18n.gettext("Zoom out"),
+                        target: widget.leftTopControlPane,
                     }),
                     new ol.control.Attribution({
-                        tipLabel: i18n.gettext("Attributions")
+                        tipLabel: i18n.gettext("Attributions"),
+                        target: widget.rightBottomControlPane,
+                        collapsible: false
                     }),
-                    new ol.control.ScaleLine()
+                    new ol.control.ScaleLine({
+                        target: widget.rightBottomControlPane,
+                        minWidth: 48
+                    }),
+                    new ol.control.Rotate({
+                        tipLabel: i18n.gettext("Reset rotation"),
+                        target: widget.leftTopControlPane,
+                        label: domConstruct.create("span", {
+                            class: "ol-control__icon material-icons",
+                            innerHTML: "arrow_upward"
+                        })
+                    }),
                 ],
                 view: new ol.View({
                     minZoom: 3
                 })
             });
 
-            // Обновление подписи центра карты
-            this.map.watch("center", function (attr, oldVal, newVal) {
-                //var pt = ol.proj.transform(newVal, widget.displayProjection, widget.lonlatProjection);
-                //widget.centerLonNode.innerHTML = number.format(pt[0], {places: 3});
-                //widget.centerLatNode.innerHTML = number.format(pt[1], {places: 3});
-            });
-
-            // Обновление подписи масштабного уровня
-            this.map.watch("resolution", function (attr, oldVal, newVal) {
-                //widget.scaleInfoNode.innerHTML = "1 : " + number.format(
-                //    widget.map.getScaleForResolution(
-                //        newVal,
-                //        widget.map.olMap.getView().getProjection().getMetersPerUnit()
-                //    ), {places: 0});
-            });
+            if (this._urlParams.linkMainMap === 'true') {
+                this.map.olMap.addControl(new LinkToMainMap({
+                    url: mainDisplayUrl,
+                    target: widget.leftBottomControlPane,
+                    tipLabel: i18n.gettext('Open full map')
+                }));
+            }
 
             // При изменении размеров контейнера пересчитываем размер карты
             aspect.after(this.mapPane, "resize", function() {
@@ -630,15 +534,69 @@ define([
 
                 idx = idx + 1;
             }, this);
-            //
-            //this.zoomToInitialExtentButton.on("click", function() {
-            //    widget._zoomToInitialExtent();
-            //});
 
             this._zoomToInitialExtent();
             this._setBasemap();
 
+            this._handlePostMessage();
+
             this._mapDeferred.resolve();
+        },
+
+        /**
+         * Generate window `message` events to listen from iframe
+         * @example
+         * window.addEventListener('message', function(evt) {
+         *    var data = evt.data;
+         *    if (data.event === 'ngMapExtentChanged') {
+         *        if (data.detail === 'zoom') {
+         *        } else if (data.detail === 'move') {
+         *        }
+         *        // OR
+         *        if (data.detail === 'position') {}
+         *    }
+         * }, false);
+         */
+        _handlePostMessage: function () {
+            var widget = this;
+            var parent = window.parent;
+            if (this._urlParams.events === 'true' && parent && parent.postMessage) {
+                var commonOptions = {
+                    event: 'ngMapExtentChanged'
+                };
+                var parsePosition = function(pos) {
+                    return {
+                        zoom: pos.zoom,
+                        lat: pos.center[1],
+                        lon: pos.center[0]
+                    }
+                };
+                widget.map.watch('position', function (name, oldPosition, newPosition) {
+                    oldPosition = oldPosition ? parsePosition(oldPosition) : {};
+                    newPosition = parsePosition(newPosition);
+                    // set array of position part to compare between old and new state
+                    var events = [
+                        { params: ['lat', 'lon'], name: 'move' },
+                        { params: ['zoom'], name: 'zoom' },
+                    ];
+                    var transformPosition = widget.map.getPosition(widget.lonlatProjection);
+                    // prepare to send transform position
+                    commonOptions.data = parsePosition(transformPosition);
+                    array.forEach(events, function (event) {
+                        var isChange = array.some(event.params, function (p) {
+                            return oldPosition[p] !== newPosition[p];
+                        })
+                        if (isChange) {
+                            commonOptions.detail = event.name;
+                            // message should be a string to work correctly with all browsers and systems
+                            parent.postMessage(JSON.stringify(commonOptions), '*');
+                        }
+                    });
+                    // on any position change
+                    commonOptions.detail = name
+                    parent.postMessage(JSON.stringify(commonOptions), '*');
+                })
+            }
         },
 
         _zoomToInitialExtent: function () {
@@ -756,11 +714,14 @@ define([
         },
 
         _toolsSetup: function () {
-            //this.addTool(new ToolZoom({display: this, out: false}));
-            //this.addTool(new ToolZoom({display: this, out: true}));
-            //
-            //this.addTool(new ToolMeasure({display: this, type: "LineString"}));
-            //this.addTool(new ToolMeasure({display: this, type: "Polygon"}));
+            var mapStates;
+
+            this.identify = new Identify({display: this});
+            mapStates = MapStatesObserver.getInstance();
+            mapStates.addState('identifying', this.identify);
+            mapStates.setDefaultState('identifying', true);
+
+            topic.publish('/webmap/tools/initialized')
         },
 
         _pluginsSetup: function (wmplugin) {

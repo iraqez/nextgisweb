@@ -10,12 +10,9 @@
         var mainDisplayUrl = "${request.route_url('webmap.display', id=obj.id)}?${request.query_string | n}";
 
         require([
-            "dojo/parser",
-            "dojo/ready",
-            "ngw-webmap/Display"
+            "dojo/parser", "dojo/ready", "ngw-webmap/Display"
         ], function (
-            parser,
-            ready
+            parser, ready
         ) {
             ready(function() {
                 parser.parse();

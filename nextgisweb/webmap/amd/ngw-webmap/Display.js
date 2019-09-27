@@ -12,6 +12,8 @@ define([
     "dojo/number",
     "dojo/aspect",
     "dojo/io-query",
+    "dojo/dom-construct",
+    "dojo/dom-class",
     "openlayers/ol",
     "ngw/openlayers/Map",
     "ngw/openlayers/layer/Vector",
@@ -34,10 +36,26 @@ define([
     "ngw-pyramid/hbs-i18n",
     // tools
     "ngw-webmap/MapToolbar",
+    "ngw-webmap/controls/InitialExtent",
+    "ngw-webmap/controls/InfoScale",
     "./tool/Base",
     "./tool/Zoom",
     "./tool/Measure",
-    "./ui/PrintButton/PrintButton",
+    "./tool/Identify",
+    "ngw-webmap/FeatureHighlighter",
+    //left panel
+    "ngw-pyramid/navigation-menu/NavigationMenu",
+    "ngw-webmap/ui/LayersPanel/LayersPanel",
+    "ngw-webmap/ui/PrintMapPanel/PrintMapPanel",
+    "ngw-webmap/ui/SearchPanel/SearchPanel",
+    "ngw-webmap/ui/BookmarkPanel/BookmarkPanel",
+    "ngw-webmap/ui/SharePanel/SharePanel",
+    "ngw-webmap/ui/InfoPanel/InfoPanel",
+    "ngw-webmap/ui/AnnotationsPanel/AnnotationsPanel",
+    "./tool/Swipe",
+    "ngw-webmap/MapStatesObserver",
+    // utils
+    "./utils/URL",
     // settings
     "ngw/settings!webmap",
     // template
@@ -50,7 +68,6 @@ define([
     "dijit/form/Select",
     "dijit/form/DropDownButton",
     "dijit/ToolbarSeparator",
-    "ngw-webmap/ui/NgwShareButtons/NgwShareButtons",
     // css
     "xstyle/css!" + ngwConfig.amdUrl + "cbtree/themes/claro/claro.css",
     "xstyle/css!" + ngwConfig.amdUrl + "openlayers/ol.css",
@@ -68,6 +85,8 @@ define([
     number,
     aspect,
     ioQuery,
+    domConstruct,
+    domClass,
     ol,
     Map,
     Vector,
@@ -89,11 +108,15 @@ define([
     i18n,
     hbsI18n,
     MapToolbar,
-    ToolBase,
-    ToolZoom,
-    ToolMeasure,
-    PrintButton,
-    clientSettings
+    InitialExtent, InfoScale, ToolBase, ToolZoom, ToolMeasure, Identify, FeatureHighlighter,
+    NavigationMenu,
+    LayersPanel, PrintMapPanel, SearchPanel, BookmarkPanel, SharePanel, InfoPanel, AnnotationsPanel,
+    ToolSwipe,
+    MapStatesObserver,
+    URL,
+    clientSettings,
+    //template
+    TabContainer, BorderContainer
 ) {
 
     var CustomItemFileWriteStore = declare([ItemFileWriteStore], {
@@ -182,24 +205,43 @@ define([
         // Для загрузки изображения
         assetUrl: ngwConfig.assetUrl,
 
+        // Параметр адресной строки для установки имени активной панели
+        modeURLParam: 'panel',
+        emptyModeURLValue: 'none',
+
+        // Активная левая панель
+        activeLeftPanel: 'layersPanel',
+        navigationMenuItems: [
+            {
+                title: i18n.gettext('Layers'),
+                icon: 'layers',
+                name: 'layers',
+                value: 'layersPanel'
+            },
+            {
+                title: i18n.gettext('Search'),
+                icon: 'search',
+                name: 'search',
+                value: 'searchPanel'
+            },
+            {
+                title: i18n.gettext('Share'),
+                icon: 'share',
+                name: 'share',
+                value: 'sharePanel'
+            },
+            {
+                title: i18n.gettext('Print map'),
+                icon: 'print',
+                name: 'print',
+                value: 'printMapPanel'
+            }
+        ],
         constructor: function (options) {
             declare.safeMixin(this, options);
 
             // Извлекаем GET-параметры из URL
-            this._urlParams = (function(){
-                var url, query, queryObject;
-                url = window.location.toString();
-                if (url.indexOf("?") !== -1) {
-                    query = url.substring(url.indexOf("?") + 1, url.length);
-                    queryObject = ioQuery.queryToObject(query);
-                    if (lang.isString(queryObject.styles)) {
-                        queryObject.styles = queryObject.styles.split(",");
-                        queryObject.styles = array.map(queryObject.styles, function(i){ return parseInt(i, 10); });
-                    }
-                    return queryObject;
-                }
-                return {};
-            })();
+            this._urlParams = URL.getURLParams();
 
             this._itemStoreDeferred = new LoggedDeferred("_itemStoreDeferred");
             this._mapDeferred = new LoggedDeferred("_mapDeferred");
@@ -208,7 +250,7 @@ define([
             this._startupDeferred = new LoggedDeferred("_startupDeferred");
 
             var widget = this;
-
+            
             // Асинхронная загрузка необходимых модулей
             this._midDeferred = {};
             this._mid = {};
@@ -282,33 +324,149 @@ define([
                 this.displayProjection
             );
 
-            // Дерево элементов слоя
-            this.itemTree = new Tree({
-                style: "height: 100%",
-                model: this.itemModel,
-                autoExpand: true,
-                showRoot: false
-            });
+            // Панель слоев
+            widget._layersPanelSetup();
 
-            // Размещаем дерево, когда виджет будет готов
-            all([this._layersDeferred, this._postCreateDeferred]).then(
-                function () { widget.itemTree.placeAt(widget.layerTreePane); }
-            ).then(undefined, function (err) { console.error(err); });
-
-            // Загружаем закладки, когда кнопка будет готова
-            this._postCreateDeferred.then(
+            // Панель печати
+            all([widget._layersDeferred, widget._postCreateDeferred]).then(
                 function () {
-                    widget.mapToolbar.items.loadBookmarks();
+                    widget.printMapPanel = new PrintMapPanel({
+                        region: 'left',
+                        splitter: false,
+                        title: i18n.gettext("Print map"),
+                        isOpen: widget.activeLeftPanel == "printMapPanel",
+                        class: "dynamic-panel--fullwidth",
+                        gutters: false,
+                        map: widget.map.olMap
+                    });
+
+                    if (widget.activeLeftPanel == "printMapPanel")
+                        widget.activatePanel(widget.printMapPanel);
+
+                    widget.printMapPanel.on("closed", function(){
+                        widget.navigationMenu.reset();
+                    });
                 }
             ).then(undefined, function (err) { console.error(err); });
 
-            // Выбранный элемент
-            this.itemTree.watch("selectedItem", function (attr, oldVal, newVal) {
-                widget.set(
-                    "itemConfig",
-                    widget._itemConfigById[widget.itemStore.getValue(newVal, "id")]
-                );
-                widget.set("item", newVal);
+            // Панель поиска
+            all([widget._layersDeferred, widget._postCreateDeferred]).then(
+                function () {
+                    widget.searchPanel = new SearchPanel({
+                        region: 'left',
+                        class: "dynamic-panel--fullwidth",
+                        isOpen: widget.activeLeftPanel == "searchPanel",
+                        gutters: false,
+                        withCloser: false,
+                        display: widget
+                    });
+
+                    if (widget.activeLeftPanel == "searchPanel")
+                        widget.activatePanel(widget.searchPanel);
+
+                    widget.searchPanel.on("closed", function(){
+                        widget.navigationMenu.reset();
+                    });
+                }
+            ).then(undefined, function (err) { console.error(err); });
+
+            // Панель закладок
+            if (this.config.bookmarkLayerId) {
+                this.navigationMenuItems.splice(2, 0, { title: i18n.gettext('Bookmarks'), name: 'bookmark', icon: 'bookmark', value: 'bookmarkPanel'});
+
+                all([widget._layersDeferred, widget._postCreateDeferred]).then(
+                    function () {
+                        widget.bookmarkPanel = new BookmarkPanel({
+                            region: 'left',
+                            class: "dynamic-panel--fullwidth",
+                            title: i18n.gettext("Bookmarks"),
+                            isOpen: widget.activeLeftPanel == "bookmarkPanel",
+                            gutters: false,
+                            withCloser: false,
+                            display: widget,
+                            bookmarkLayerId: widget.config.bookmarkLayerId
+                        });
+
+                        if (widget.activeLeftPanel == "bookmarkPanel")
+                            widget.activatePanel(widget.bookmarkPanel);
+
+                        widget.bookmarkPanel.on("closed", function () {
+                            widget.navigationMenu.reset();
+                        });
+                    }
+                ).then(undefined, function (err) {
+                    console.error(err);
+                });
+            }
+
+            // Панель с описанием
+            if (this.config.webmapDescription) {
+                this.navigationMenuItems.splice(2,0, {
+                    title: i18n.gettext('Description'),
+                    name: 'info',
+                    icon: 'info_outline',
+                    value: 'infoPanel'
+                });
+                // Асинхронный запуск чтобы применялись УРЛ параметры назначения стартового режима
+                setTimeout(function () {
+                    widget.infoPanel = new InfoPanel({
+                        region: 'left',
+                        class: "info-panel dynamic-panel--fullwidth",
+                        withTitle: false,
+                        isOpen: widget.activeLeftPanel == "infoPanel",
+                        gutters: false,
+                        withCloser: false,
+                        description: widget.config.webmapDescription,
+                        display: widget
+                    });
+
+                    if (widget.activeLeftPanel == "infoPanel")
+                        widget.activatePanel(widget.infoPanel);
+
+                    widget.infoPanel.on("closed", function () {
+                        widget.navigationMenu.reset();
+                    });
+                }, 0);
+            }
+    
+            this._buildAnnotationsPanel();
+
+            // Панель "Поделиться"
+            all([widget._layersDeferred, widget._postCreateDeferred]).then(
+                function () {
+                    var itemStoreListener;
+                    widget.sharePanel = new SharePanel({
+                        region: 'left',
+                        class: "dynamic-panel--fullwidth",
+                        title: i18n.gettext("Share"),
+                        isOpen: widget.activeLeftPanel == "sharePanel",
+                        gutters: false,
+                        withCloser: false,
+                        display: widget
+                    });
+
+                    if (widget.activeLeftPanel == "sharePanel")
+                        widget.activatePanel(widget.sharePanel);
+
+                    widget.sharePanel.on("shown", function () {
+                        widget.map.olMap.getView().on("change", widget.sharePanel.setPermalinkUrl, widget.sharePanel);
+                        widget.map.olMap.getView().on("change", widget.sharePanel.setEmbedCode, widget.sharePanel);
+                        itemStoreListener = widget.itemStore.on("Set", function (item, attr) {
+                            widget.sharePanel.setPermalinkUrl();
+                            widget.sharePanel.setEmbedCode();
+                        });
+                    });
+
+                    widget.sharePanel.on("closed", function () {
+                        widget.navigationMenu.reset();
+                        widget.map.olMap.getView().un("change", widget.sharePanel.setPermalinkUrl, widget.sharePanel);
+                        widget.map.olMap.getView().un("change", widget.sharePanel.setEmbedCode, widget.sharePanel);
+                        if (itemStoreListener) itemStoreListener.remove();
+                    });
+
+                }
+            ).then(undefined, function (err) {
+               console.error(err);
             });
 
             // Карта
@@ -324,29 +482,6 @@ define([
                 }
             ).then(undefined, function (err) { console.error(err); });
 
-            all([this._mapDeferred, this._postCreateDeferred]).then(
-                function () {
-                    // Формируем список слоев базовых карты в списке выбора
-                    array.forEach(Object.keys(widget.map.layers), function (key) {
-                        var layer = widget.map.layers[key];
-                        if (layer.isBaseLayer) {
-                            widget.basemapSelect.addOption({
-                                value: key,
-                                label: layer.title
-                            });
-                        }
-                    });
-
-                    // И добавляем возможность переключения
-                    widget.basemapSelect.watch("value", function (attr, oldVal, newVal) {
-                        widget.map.layers[oldVal].olLayer.setVisible(false);
-                        widget.map.layers[newVal].olLayer.setVisible(true);
-                        widget._baseLayer = widget.map.layers[newVal];
-                    });
-                    if (widget._urlParams.base) { widget.basemapSelect.set("value", widget._urlParams.base); }
-                }
-            ).then(undefined, function (err) { console.error(err); });
-
             // Слои элементов
             all([this._midDeferred.adapter, this._itemStoreDeferred]).then(
                 function () {
@@ -355,11 +490,11 @@ define([
             ).then(undefined, function (err) { console.error(err); });
 
             all([this._layersDeferred, this._mapSetup]).then(
-                function () {
+                lang.hitch(this, function () {
                     // Добавляем слои на карту
                     widget._mapAddLayers();
 
-                    widget._mapAddHighlightOverlay();
+                    widget.featureHighlighter = new FeatureHighlighter(this.map);
 
                     // Связываем изменение чекбокса с видимостью слоя
                     var store = widget.itemStore;
@@ -370,7 +505,7 @@ define([
                             layer.set("visibility", newVal);
                         }
                     });
-                }
+                })
             ).then(undefined, function (err) { console.error(err); });
 
 
@@ -382,30 +517,69 @@ define([
                 }
             ).then(undefined, function (err) { console.error(err); });
 
-            // Свернем те элементы дерева, которые не отмечены как развернутые.
-            // По-умолчанию все элементы развернуты за счет autoExpand у itemTree
-            all([this._itemStoreDeferred, widget.itemTree.onLoadDeferred]).then(
-                function () {
-                    widget.itemStore.fetch({
-                        queryOptions: { deep: true },
-                        onItem: function (item) {
-                            var node = widget.itemTree.getNodesByItem(item)[0],
-                                config = widget._itemConfigById[widget.itemStore.getValue(item, "id")];
-                            if (node && config.type === "group" && !config.expanded) {
-                                node.collapse();
-                            }
-                        }
-                    });
+            // Установка открытой панели из параметров URL
+            var panelNameFromURL = this._urlParams[this.modeURLParam];
+            if (panelNameFromURL) {
+                if (panelNameFromURL === this.emptyModeURLValue) {
+                    this.activeLeftPanel = '';
+                } else {
+                    var menuItem = this._findNavigationMenuItem(panelNameFromURL);
+                    if (menuItem) {
+                        this.activeLeftPanel = menuItem.value;
+                    }
                 }
-            ).then(undefined, function (err) { console.error(err); });
-
+            }
 
             // Инструменты
             this.tools = [];
         },
+    
+        _buildAnnotationsPanel: function () {
+            if (!this.config.annotations ||
+                !this.config.annotations.enabled ||
+                !this.config.annotations.scope.read) {
+                return false;
+            }
+        
+            this.navigationMenuItems.splice(2, 0, {
+                title: i18n.gettext('Annotations'),
+                name: 'annotation',
+                icon: 'message',
+                value: 'annotationPanel'
+            });
+        
+            var buildAnnotationsPanel = function (widget) {
+                widget.annotationPanel = new AnnotationsPanel({
+                    region: 'left',
+                    class: 'dynamic-panel--fullwidth',
+                    title: i18n.gettext('Annotations'),
+                    isOpen: widget.activeLeftPanel == 'annotationPanel',
+                    gutters: false,
+                    withCloser: false,
+                    display: widget
+                });
+            
+                if (widget.activeLeftPanel == 'annotationPanel')
+                    widget.activatePanel(widget.annotationPanel);
+            
+                widget.annotationPanel.on('closed', function () {
+                    widget.navigationMenu.reset();
+                });
+            };
+        
+            all([this._layersDeferred, this._postCreateDeferred])
+                .then(lang.hitch(this, function () {
+                    buildAnnotationsPanel(this)
+                }))
+                .then(undefined, function (err) {
+                    console.error(err);
+                });
+        
+        },
 
         postCreate: function () {
             this.inherited(arguments);
+            var widget = this;
 
             // Модифицируем TabContainer так, чтобы он показывал табы только
             // в том случае, если их больше одного, т.е. один таб не показываем
@@ -439,6 +613,17 @@ define([
                 }
             });
 
+            // Левое меню
+            this._navigationMenuSetup();
+
+            // Контейнер для левой панели
+            this.leftPanelPane = new BorderContainer({
+                class: "leftPanelPane",
+                region: "left",
+                gutters: false,
+                splitter: true
+            });
+
             this._postCreateDeferred.resolve();
         },
 
@@ -468,6 +653,7 @@ define([
 
                     copy.visibility = null;
                     copy.checked = item.visibility;
+                    copy.position = item.drawOrderPosition;
 
                 } else if (copy.type === "group" || copy.type === "root") {
                     copy.children = array.map(item.children, function (c) { return prepare_item(c); });
@@ -532,43 +718,64 @@ define([
         _mapSetup: function () {
             var widget = this;
 
+            widget.mapToolbar = new MapToolbar({
+                display: widget,
+                target: widget.leftBottomControlPane
+            });
+
             // Инициализация карты
             this.map = new Map({
                 target: this.mapNode,
                 logo: false,
-                controls: [
-                    new ol.control.Rotate({
-                        tipLabel: i18n.gettext("Reset rotation")
-                    }),
-                    new ol.control.Zoom({
-                        zoomInTipLabel: i18n.gettext("Zoom in"),
-                        zoomOutTipLabel: i18n.gettext("Zoom out")
-                    }),
-                    new ol.control.Attribution({
-                        tipLabel: i18n.gettext("Attributions")
-                    }),
-                    new ol.control.ScaleLine()
-                ],
+                controls: [],
                 view: new ol.View({
                     minZoom: 3
                 })
             });
 
-            // Обновление подписи центра карты
-            this.map.watch("center", function (attr, oldVal, newVal) {
-                var pt = ol.proj.transform(newVal, widget.displayProjection, widget.lonlatProjection);
-                widget.mapToolbar.items.centerLonNode.innerHTML = number.format(pt[0], {places: 3});
-                widget.mapToolbar.items.centerLatNode.innerHTML = number.format(pt[1], {places: 3});
-            });
-
-            // Обновление подписи масштабного уровня
-            this.map.watch("resolution", function (attr, oldVal, newVal) {
-                widget.mapToolbar.items.scaleInfoNode.innerHTML = "1 : " + number.format(
-                    widget.map.getScaleForResolution(
-                        newVal,
-                        widget.map.olMap.getView().getProjection().getMetersPerUnit()
-                    ), {places: 0});
-            });
+            this._mapAddControls([
+                new ol.control.Zoom({
+                    zoomInLabel: domConstruct.create("span", {
+                        class: "ol-control__icon material-icons",
+                        innerHTML: "add"
+                    }),
+                    zoomOutLabel: domConstruct.create("span", {
+                        class: "ol-control__icon material-icons",
+                        innerHTML: "remove"
+                    }),
+                    zoomInTipLabel: i18n.gettext("Zoom in"),
+                    zoomOutTipLabel: i18n.gettext("Zoom out"),
+                    target: widget.leftTopControlPane,
+                }),
+                new ol.control.Attribution({
+                    tipLabel: i18n.gettext("Attributions"),
+                    target: widget.rightBottomControlPane,
+                    collapsible: false
+                }),
+                new ol.control.ScaleLine({
+                    target: widget.rightBottomControlPane,
+                    units: widget.config.measurementSystem,
+                    minWidth: 48
+                }),
+                new InfoScale({
+                    display: widget,
+                    target: widget.rightBottomControlPane
+                }),
+                new InitialExtent({
+                    display: widget,
+                    target: widget.leftTopControlPane,
+                    tipLabel: i18n.gettext("Initial extent")
+                }),
+                new ol.control.Rotate({
+                    tipLabel: i18n.gettext("Reset rotation"),
+                    target: widget.leftTopControlPane,
+                    label: domConstruct.create("span", {
+                        class: "ol-control__icon material-icons",
+                        innerHTML: "arrow_upward"
+                    })
+                }),
+                widget.mapToolbar
+            ]);
 
             // При изменении размеров контейнера пересчитываем размер карты
             aspect.after(this.mapPane, "resize", function() {
@@ -602,65 +809,20 @@ define([
                 idx = idx + 1;
             }, this);
 
-            this.mapToolbar.items.zoomToInitialExtentButton.on("click", function() {
-                widget._zoomToInitialExtent();
-            });
-
-            this.mapToolbar.items.leftToolbarSwitch.on("change", lang.hitch(this, function (isLayersShow) {
-                if (isLayersShow) {
-                    this.mapToolbar.items.leftToolbarSwitch.set("title", i18n.gettext("Hide layers"));
-                    this.mapToolbar.items.leftToolbarSwitch.set("iconClass", "iconSideHide");
-                    this.mainContainer.addChild(this.leftPanel);
-                }
-                else {
-                    this.mapToolbar.items.leftToolbarSwitch.set("title", i18n.gettext("Show layers"));
-                    this.mapToolbar.items.leftToolbarSwitch.set("iconClass", "iconSideExpand");
-                    this.mainContainer.removeChild(this.leftPanel);
-                }
-            }));
-
             this._zoomToInitialExtent();
 
             this._mapDeferred.resolve();
         },
 
+        _mapAddControls: function(controls){
+            array.forEach(controls, function(control){
+                this.map.olMap.addControl(control);
+            }, this);
+        },
         _mapAddLayers: function () {
             array.forEach(this._layer_order, function (id) {
                 this.map.addLayer(this._layers[id]);
             }, this);
-        },
-
-        _mapAddHighlightOverlay: function () {
-            var wkt = new ol.format.WKT(),
-                overlay, source;
-
-            topic.subscribe("feature.highlight", function (e) {
-                source.clear();
-                source.addFeature(new ol.Feature({
-                    geometry: wkt.readGeometry(e.geom)
-                }));
-            });
-
-            topic.subscribe("feature.unhighlight", function () {
-                source.clear();
-            });
-
-            var stroke = new ol.style.Stroke({
-                width: 3,
-                color: "rgba(255,255,0,1)"
-            });
-            overlay = new Vector("highlight", {
-                title: "Highlight Overlay",
-                style: new ol.style.Style({
-                    stroke: stroke,
-                    image: new ol.style.Circle({
-                        stroke: stroke,
-                        radius: 5
-                    })
-                })
-            });
-            source = overlay.olLayer.getSource();
-            this.map.addLayer(overlay);
         },
 
         _adaptersSetup: function () {
@@ -674,25 +836,36 @@ define([
         },
 
         _layersSetup: function () {
-            var widget = this, store = this.itemStore;
+            var widget = this,
+                store = this.itemStore,
+                visibleStyles = null;
 
             this._adaptersSetup();
 
             this._layers = {};              // Список всех слоев по id
             this._layer_order = [];         // Порядок слоев от нижнего к верхнему
 
+            if (lang.isString(widget._urlParams.styles)) {
+                visibleStyles = widget._urlParams.styles.split(',');
+                visibleStyles = array.map(visibleStyles, function (i) {
+                    return parseInt(i, 10);
+                });
+            }
+
             // Инициализация слоев
             store.fetch({
                 query: {type: "layer"},
                 queryOptions: {deep: true},
+                sort: widget.config.drawOrderEnabled ? [{
+                    attribute: "position"
+                }] : null,
                 onItem: function (item) {
                     widget._layerSetup(item);
                     widget._layer_order.unshift(store.getValue(item, "id"));
 
                     // Включаем слои, указанные в URL
                     var cond,
-                        layer = widget._layers[store.getValue(item, "id")],
-                        visibleStyles = widget._urlParams.styles;
+                        layer = widget._layers[store.getValue(item, "id")];
                     if (visibleStyles) {
                         cond = array.indexOf(visibleStyles, store.getValue(item, "styleId")) !== -1;
                         layer.olLayer.setVisible(cond);
@@ -740,8 +913,14 @@ define([
             this.mapToolbar.items.addTool(new ToolMeasure({display: this, type: "LineString"}), 'measuringLength');
             this.mapToolbar.items.addTool(new ToolMeasure({display: this, type: "Polygon"}), 'measuringArea');
 
-            this.mapToolbar.items.addSeparator();
-            this.mapToolbar.items.addButton(PrintButton);
+            this.mapToolbar.items.addTool(new ToolSwipe({display: this, orientation: "vertical"}), 'swipeVertical');
+
+            this.identify = new Identify({display: this});
+            var mapStates = MapStatesObserver.getInstance();
+            mapStates.addState('identifying', this.identify);
+            mapStates.setDefaultState('identifying', true);
+
+            topic.publish('/webmap/tools/initialized')
         },
 
         _pluginsSetup: function (wmplugin) {
@@ -777,6 +956,133 @@ define([
                     }
                 );
             }, this);
+        },
+
+        _findNavigationMenuItem: function (itemValue) {
+            for (var fry = 0; fry < this.navigationMenuItems.length; fry++) {
+                var menuItem = this.navigationMenuItems[fry];
+                if ([menuItem.icon, menuItem.value, menuItem.name].indexOf(itemValue) !== -1) {
+                    return menuItem;
+                }
+            }
+            return false;
+        },
+
+        _setActivePanelURL: function () {
+            if (this.activeLeftPanel) {
+                var menuItem = this._findNavigationMenuItem(this.activeLeftPanel);
+                if (menuItem) {
+                    URL.setURLParam(this.modeURLParam, menuItem.name);
+                }
+            } else {
+                URL.setURLParam(this.modeURLParam, this.emptyModeURLValue)
+            }
+        },
+
+        _navigationMenuSetup: function(){
+            var widget = this;
+
+            this.navigationMenu = new NavigationMenu({
+                value: this.activeLeftPanel,
+                items: this.navigationMenuItems,
+                region: 'left'
+            }).placeAt(this.navigationMenuPane);
+
+            this.navigationMenu.watch("value", function(name, oldValue, value){
+                if (oldValue && widget[oldValue])
+                    widget.deactivatePanel(widget[oldValue]);
+
+                if (widget[value])
+                    widget.activatePanel(widget[value]);
+
+                widget.activeLeftPanel = value;
+                widget._setActivePanelURL();
+            });
+            this._setActivePanelURL();
+        },
+
+        _layersPanelSetup: function(){
+            var widget = this;
+
+            // Дерево элементов слоя
+            widget.itemTree = new Tree({
+                style: "height: 100%",
+                model: widget.itemModel,
+                autoExpand: true,
+                showRoot: false
+            });
+
+            // Выбранный элемент
+            widget.itemTree.watch("selectedItem", function (attr, oldVal, newVal) {
+                widget.set(
+                    "itemConfig",
+                    widget._itemConfigById[widget.itemStore.getValue(newVal, "id")]
+                );
+                widget.set("item", newVal);
+            });
+
+            // Размещаем дерево, когда виджет будет готов
+            all([widget._layersDeferred, widget._postCreateDeferred]).then(
+                function () {
+                    widget.layersPanel = new LayersPanel({
+                        region: 'left',
+                        class: "dynamic-panel--fullwidth",
+                        title: i18n.gettext("Layers"),
+                        isOpen: widget.activeLeftPanel == "layersPanel",
+                        gutters: false,
+                        withCloser: false
+                    });
+
+                    widget.itemTree.placeAt(widget.layersPanel.contentWidget.layerTreePane);
+
+                    if (widget.activeLeftPanel == "layersPanel")
+                        widget.activatePanel(widget.layersPanel);
+
+                    widget.layersPanel.on("closed", function(){
+                        widget.navigationMenu.reset();
+                    });
+                }
+            ).then(undefined, function (err) { console.error(err); });
+
+            // Свернем те элементы дерева, которые не отмечены как развернутые.
+            // По-умолчанию все элементы развернуты за счет autoExpand у itemTree
+            all([widget._itemStoreDeferred, widget.itemTree.onLoadDeferred]).then(
+                function () {
+                    widget.itemStore.fetch({
+                        queryOptions: { deep: true },
+                        onItem: function (item) {
+                            var node = widget.itemTree.getNodesByItem(item)[0],
+                                config = widget._itemConfigById[widget.itemStore.getValue(item, "id")];
+                            if (node && config.type === "group" && !config.expanded) {
+                                node.collapse();
+                            }
+                        }
+                    });
+                }
+            ).then(undefined, function (err) { console.error(err); });
+
+            all([this._layersDeferred, this._mapDeferred, this._postCreateDeferred]).then(
+                function () {
+                    // Формируем список слоев базовых карты в списке выбора
+                    array.forEach(Object.keys(widget.map.layers), function (key) {
+                        var layer = widget.map.layers[key];
+                        if (layer.isBaseLayer) {
+                            widget.layersPanel.contentWidget.basemapSelect.addOption({
+                                value: key,
+                                label: layer.title
+                            });
+                        }
+                    });
+
+                    // И добавляем возможность переключения
+                    widget.layersPanel.contentWidget.basemapSelect.watch("value", function (attr, oldVal, newVal) {
+                        widget.map.layers[oldVal].olLayer.setVisible(false);
+                        widget.map.layers[newVal].olLayer.setVisible(true);
+                        widget._baseLayer = widget.map.layers[newVal];
+                    });
+                    if (widget._urlParams.base) { widget.layersPanel.contentWidget.basemapSelect.set("value", widget._urlParams.base); }
+                }
+            ).then(undefined, function (err) { console.error(err); });
         },
 
         getVisibleItems: function () {
@@ -822,6 +1128,28 @@ define([
             } else {
                 this.map.olMap.getView().fit(this._extent);
             }
+        },
+        activatePanel: function(panel){
+            if (panel.isFullWidth){
+                domClass.add(this.leftPanelPane.domNode,  "leftPanelPane--fullwidth");
+                this.leftPanelPane.set("splitter", false);
+            }
+
+            this.leftPanelPane.addChild(panel);
+            this.mainContainer.addChild(this.leftPanelPane);
+            panel.show();
+        },
+        deactivatePanel: function(panel){
+            this.mainContainer.removeChild(this.leftPanelPane);
+            this.leftPanelPane.removeChild(panel);
+            if (panel.isFullWidth){
+                domClass.remove(this.leftPanelPane.domNode,  "leftPanelPane--fullwidth");
+                this.leftPanelPane.set("splitter", true);
+            }
+            if (panel.isOpen) {
+                panel.hide();
+            }
         }
     });
 });
+

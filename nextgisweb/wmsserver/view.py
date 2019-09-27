@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
+import json
+
 from StringIO import StringIO
 
 from lxml import etree
@@ -16,6 +18,7 @@ from ..resource import (
     ServiceScope, DataScope)
 from ..spatial_ref_sys import SRS
 from ..geometry import geom_from_wkt
+from .. import geojson
 
 from .model import Service
 from .util import _
@@ -37,18 +40,18 @@ def handler(obj, request):
     request.resource_permission(ServiceScope.connect)
 
     params = dict((k.upper(), v) for k, v in request.params.iteritems())
-    req = params.get('REQUEST')
-    service = params.get('SERVICE')
+    req = params.get('REQUEST', '').upper()
+    service = params.get('SERVICE', '').upper()
 
-    if req == 'GetCapabilities':
+    if req == 'GETCAPABILITIES':
         if service != 'WMS':
             raise HTTPBadRequest("Invalid SERVICE parameter value.")
         return _get_capabilities(obj, request)
-    elif req == 'GetMap':
+    elif req == 'GETMAP':
         return _get_map(obj, request)
-    elif req == 'GetFeatureInfo':
+    elif req == 'GETFEATUREINFO':
         return _get_feature_info(obj, request)
-    elif req == 'GetLegendGraphic':
+    elif req == 'GETLEGENDGRAPHIC':
         return _get_legend_graphic(obj, request)
     else:
         raise HTTPBadRequest("Invalid REQUEST parameter value.")
@@ -168,6 +171,7 @@ def _get_feature_info(obj, request):
     p_width = int(params.get('WIDTH'))
     p_height = int(params.get('HEIGHT'))
     p_srs = params.get('SRS')
+    p_info_format = params.get('INFO_FORMAT', b'text/html')
 
     p_x = float(params.get('X'))
     p_y = float(params.get('Y'))
@@ -220,6 +224,25 @@ def _get_feature_info(obj, request):
         if fcount >= p_feature_count:
             break
 
+    if p_info_format == 'application/json':
+        result = [
+            dict(
+                keyname=result.keyname,
+                display_name=result.display_name,
+                features=[
+                    {
+                        fld.display_name: feature.fields[fld.keyname]
+                        for fld in result.feature_layer.fields
+                    }
+                    for feature in result.features
+                ],
+            )
+            for result in results
+        ]
+        return Response(
+            json.dumps(result, cls=geojson.Encoder),
+            content_type=b'application/json')
+
     return Response(render_template(
         'nextgisweb:wmsserver/template/get_feature_info_html.mako',
         dict(results=results, resource=obj), request=request
@@ -243,11 +266,6 @@ def _get_legend_graphic(obj, request):
 def setup_pyramid(comp, config):
     config.add_route(
         'wmsserver.wms', '/api/resource/{id:\d+}/wms',
-        factory=resource_factory,
-    ).add_view(handler, context=Service)
-
-    config.add_route(
-        '#wmsserver.wms', '/resource/{id:\d+}/wms',
         factory=resource_factory,
     ).add_view(handler, context=Service)
 

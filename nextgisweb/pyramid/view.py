@@ -1,39 +1,29 @@
 # -*- coding: utf-8 -*-
-from __future__ import unicode_literals
+from __future__ import division, absolute_import, print_function, unicode_literals
 import codecs
 import os.path
 
 from pyramid.response import FileResponse
-from pyramid.httpexceptions import HTTPFound, HTTPNotFound, HTTPForbidden
+from pyramid.httpexceptions import HTTPFound, HTTPNotFound
 
 from pkg_resources import resource_filename
 
 from .. import dynmenu as dm
+from ..core.exception import UserException
 
-from .util import _, ClientRoutePredicate
+from .util import _
 
 
 def home(request):
-    home_url = request.env.pyramid.settings.get('home_url')
-    if home_url is not None:
-        return HTTPFound(request.application_url + home_url)
+    try:
+        home_path = request.env.core.settings_get('pyramid', 'home_path')
+    except KeyError:
+        home_path = None
+
+    if home_path is not None:
+        return HTTPFound(request.application_url + home_path)
     else:
         return HTTPFound(location=request.route_url('resource.show', id=0))
-
-
-def routes(request):
-    result = dict()
-    introspector = request.registry.introspector
-    for itm in introspector.get_category('routes'):
-        route = itm['introspectable']['object']
-        for p in route.predicates:
-            if isinstance(p, ClientRoutePredicate):
-                result[route.name] = dict(
-                    pattern=route.generate(dict(
-                        [(k, '__%s__' % k)
-                         for k in p.val])),
-                    keys=p.val)
-    return result
 
 
 def control_panel(request):
@@ -50,14 +40,6 @@ def help_page(request):
     ) as fp:
         help_page = fp.read()
     return dict(title=_("Help"), help_page=help_page)
-
-
-def logo(request):
-    settings = request.env.pyramid.settings
-    if 'logo' in settings and os.path.isfile(settings['logo']):
-        return FileResponse(settings['logo'], request=request)
-    else:
-        raise HTTPNotFound()
 
 
 def favicon(request):
@@ -96,6 +78,20 @@ def cors(request):
         dynmenu=request.env.pyramid.control_panel)
 
 
+def custom_css(request):
+    request.require_administrator()
+    return dict(
+        title=_("Custom CSS"),
+        dynmenu=request.env.pyramid.control_panel)
+
+
+def cp_logo(request):
+    request.require_administrator()
+    return dict(
+        title=_("Custom logo"),
+        dynmenu=request.env.pyramid.control_panel)
+
+
 def system_name(request):
     request.require_administrator()
     return dict(
@@ -103,30 +99,48 @@ def system_name(request):
         dynmenu=request.env.pyramid.control_panel)
 
 
-def notfound(request):
+def miscellaneous(request):
+    request.require_administrator()
     return dict(
-        title=_("404: Page not found"),
-    )
+        title=_("Miscellaneous"),
+        dynmenu=request.env.pyramid.control_panel)
+
+
+def home_path(request):
+    request.require_administrator()
+    return dict(
+        title=_("Home path"),
+        dynmenu=request.env.pyramid.control_panel)
+
+
+def test_exception_handled(request):
+    class HandledTestException(UserException):
+        title = "Title"
+        message = "Message"
+        detail = "Detail"
+        http_status_code = 418
+
+    raise HandledTestException()
+
+
+def test_exception_unhandled(request):
+    class UnhandledTestException(Exception):
+        pass
+
+    raise UnhandledTestException()
 
 
 def setup_pyramid(comp, config):
     config.add_route('home', '/').add_view(home)
 
-    config.add_route('pyramid.routes', '/pyramid/routes') \
-        .add_view(routes, renderer='json', json=True)
-
     def ctpl(n):
         return 'nextgisweb:pyramid/template/%s.mako' % n
 
-    config.add_route('pyramid.control_panel', '/control-panel') \
+    config.add_route('pyramid.control_panel', '/control-panel', client=()) \
         .add_view(control_panel, renderer=ctpl('control_panel'))
 
     config.add_route('pyramid.help_page', '/help-page') \
         .add_view(help_page, renderer=ctpl('help_page'))
-
-    config.add_notfound_view(notfound, renderer=ctpl('404'))
-
-    config.add_route('pyramid.logo', '/logo').add_view(logo)
 
     config.add_route('pyramid.favicon', '/favicon.ico').add_view(favicon)
 
@@ -141,11 +155,36 @@ def setup_pyramid(comp, config):
     ).add_view(cors, renderer=ctpl('cors'))
 
     config.add_route(
+        'pyramid.control_panel.custom_css',
+        '/control-panel/custom-css'
+    ).add_view(custom_css, renderer=ctpl('custom_css'))
+
+    config.add_route(
+        'pyramid.control_panel.logo',
+        '/control-panel/logo'
+    ).add_view(cp_logo, renderer=ctpl('logo'))
+
+    config.add_route(
         'pyramid.control_panel.system_name',
         '/control-panel/system-name'
     ).add_view(system_name, renderer=ctpl('system_name'))
 
+    config.add_route(
+        'pyramid.control_panel.miscellaneous',
+        '/control-panel/miscellaneous'
+    ).add_view(miscellaneous, renderer=ctpl('miscellaneous'))
+
+    config.add_route(
+        'pyramid.control_panel.home_path',
+        '/control-panel/home_path'
+    ).add_view(home_path, renderer=ctpl('home_path'))
+
     config.add_route('pyramid.locale', '/locale/{locale}').add_view(locale)
+
+    config.add_route('pyramid.test_exception_handled', '/test/exception/handled') \
+        .add_view(test_exception_handled)
+    config.add_route('pyramid.test_exception_unhandled', '/test/exception/unhandled') \
+        .add_view(test_exception_unhandled)
 
     comp.control_panel = dm.DynMenu(
         dm.Label('info', _("Info")),
@@ -157,4 +196,12 @@ def setup_pyramid(comp, config):
             args.request.route_url('pyramid.control_panel.system_name'))),
         dm.Link('settings/cors', _("Cross-origin resource sharing (CORS)"), lambda args: (
             args.request.route_url('pyramid.control_panel.cors'))),
+        dm.Link('settings/custom_css', _("Custom CSS"), lambda args: (
+            args.request.route_url('pyramid.control_panel.custom_css'))),
+        dm.Link('settings/logo', _("Custom logo"), lambda args: (
+            args.request.route_url('pyramid.control_panel.logo'))),
+        dm.Link('settings/miscellaneous', _("Miscellaneous"), lambda args: (
+            args.request.route_url('pyramid.control_panel.miscellaneous'))),
+        dm.Link('settings/home_path', _("Home path"), lambda args: (
+            args.request.route_url('pyramid.control_panel.home_path'))),
     )

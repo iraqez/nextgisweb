@@ -4,9 +4,11 @@ import re
 import json
 import os.path
 from urllib2 import unquote
+from datetime import timedelta
+import base64
 
 from pyramid.response import Response, FileResponse
-from pyramid.httpexceptions import HTTPForbidden, HTTPBadRequest
+from pyramid.httpexceptions import HTTPBadRequest, HTTPNotFound
 
 from ..env import env
 from ..package import pkginfo
@@ -78,6 +80,10 @@ def cors_tween_factory(handler, registry):
                 if '*' not in olist:
                     hadd('Access-Control-Allow-Credentials', 'true')
 
+                # Add allowed Authorization header for HTTP authentication
+                # from JavaScript. It is a good idea?
+                hadd('Access-Control-Allow-Headers', 'Authorization')
+
                 return response
 
         # Run default request handler
@@ -139,7 +145,6 @@ def cors_put(request):
 
 
 def system_name_get(request):
-    request.require_administrator()
     return dict(full_name=env.core.settings_get('core', 'system.full_name'))
 
 
@@ -153,6 +158,51 @@ def system_name_put(request):
                 v = ''
 
             env.core.settings_set('core', 'system.full_name', v)
+        else:
+            raise HTTPBadRequest("Invalid key '%s'" % k)
+
+
+def miscellaneous_get(request):
+    result = dict()
+    for k in ('units', 'degree_format'):
+        try:
+            result[k] = env.core.settings_get('core', k)
+        except KeyError:
+            pass
+
+    return result
+
+
+def miscellaneous_put(request):
+    request.require_administrator()
+
+    body = request.json_body
+    for k, v in body.iteritems():
+        if k in ('units', 'degree_format'):
+            env.core.settings_set('core', k, v)
+        else:
+            raise HTTPBadRequest("Invalid key '%s'" % k)
+
+
+def home_path_get(request):
+    request.require_administrator()
+    try:
+        home_path = env.core.settings_get('pyramid', 'home_path')
+    except KeyError:
+        home_path = None
+    return dict(home_path=home_path)
+
+
+def home_path_put(request):
+    request.require_administrator()
+
+    body = request.json_body
+    for k, v in body.iteritems():
+        if k == 'home_path':
+            if v:
+                env.core.settings_set('pyramid', 'home_path', v)
+            else:
+                env.core.settings_delete('pyramid', 'home_path')
         else:
             raise HTTPBadRequest("Invalid key '%s'" % k)
 
@@ -230,8 +280,61 @@ def statistics(request):
     return result
 
 
+def custom_css_get(request):
+    try:
+        body = request.env.core.settings_get('pyramid', 'custom_css')
+    except KeyError:
+        body = ""
+
+    return Response(body, content_type=b'text/css', expires=timedelta(days=1))
+
+
+def custom_css_put(request):
+    request.require_administrator()
+
+    body = request.body
+    if re.match(r'^\s*$', body, re.MULTILINE):
+        request.env.core.settings_delete('pyramid', 'custom_css')
+    else:
+        request.env.core.settings_set('pyramid', 'custom_css', body)
+
+    return Response()
+
+
+def logo_get(request):
+    try:
+        logodata = request.env.core.settings_get('pyramid', 'logo')
+        bindata = base64.b64decode(logodata)
+        return Response(
+            bindata, content_type=b'image/png',
+            expires=timedelta(days=1))
+
+    except KeyError:
+        raise HTTPNotFound()
+
+
+def logo_put(request):
+    request.require_administrator()
+    
+    value = request.json_body
+
+    if value is None:
+        request.env.core.settings_delete('pyramid', 'logo')
+    
+    else:
+        fn, fnmeta = request.env.file_upload.get_filename(value['id'])
+        with open(fn, 'r') as fd:
+            request.env.core.settings_set(
+                'pyramid', 'logo',
+                base64.b64encode(fd.read())) 
+
+    return Response()
+
+
 def setup_pyramid(comp, config):
-    config.add_tween('nextgisweb.pyramid.api.cors_tween_factory')
+    config.add_tween(
+        'nextgisweb.pyramid.api.cors_tween_factory',
+        under=('pyramid_debugtoolbar.toolbar_tween_factory', 'INGRESS'))
 
     config.add_route('pyramid.cors', '/api/component/pyramid/cors') \
         .add_view(cors_get, request_method='GET', renderer='json') \
@@ -262,3 +365,25 @@ def setup_pyramid(comp, config):
         'pyramid.statistics',
         '/api/component/pyramid/statistics',
     ).add_view(statistics, renderer='json')
+
+    config.add_route(
+        'pyramid.custom_css', '/api/component/pyramid/custom_css') \
+        .add_view(custom_css_get, request_method='GET') \
+        .add_view(custom_css_put, request_method='PUT')
+
+    config.add_route('pyramid.logo', '/api/component/pyramid/logo') \
+        .add_view(logo_get, request_method='GET') \
+        .add_view(logo_put, request_method='PUT')
+
+    # TODO: Add PUT method for changing custom_css setting and GUI
+
+    config.add_route('pyramid.miscellaneous',
+                     '/api/component/pyramid/miscellaneous') \
+        .add_view(miscellaneous_get, request_method='GET', renderer='json') \
+        .add_view(miscellaneous_put, request_method='PUT', renderer='json')
+
+    config.add_route('pyramid.home_path',
+                     '/api/component/pyramid/home_path') \
+        .add_view(home_path_get, request_method='GET', renderer='json') \
+        .add_view(home_path_put, request_method='PUT', renderer='json')
+

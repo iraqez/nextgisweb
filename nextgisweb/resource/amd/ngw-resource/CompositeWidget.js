@@ -14,6 +14,7 @@ define([
     "dijit/layout/BorderContainer",
     "dijit/layout/ContentPane",
     "dijit/layout/TabContainer",
+    "ngw-pyramid/ErrorDialog/ErrorDialog",
     "ngw-pyramid/i18n!resource",
     "ngw/route",
     "xstyle/css!./resource/CompositeWidget.css"
@@ -32,13 +33,10 @@ define([
     BorderContainer,
     ContentPane,
     TabContainer,
+    ErrorDialog,
     i18n,
     route
 ) {
-    var E_INVALID_DATA = "INVALID_DATA",
-        E_SERIALIZE    = "SERIALIZE",
-        E_REQUEST      = "REQUEST";
-
     var CompositeWidget = declare("ngw.resource.CompositeWidget", BorderContainer, {
         style: "width: 100%; height: 100%; padding: 1px;",
         gutters: false,
@@ -104,10 +102,10 @@ define([
 
             if (this.operation === "read" || this.operation === "update") {
 
-                // Отключаем кнопку Обновить, так как в текущем варианте
-                // данная операция не корректно работает со следующими
-                // виджетами: PermissionWidget, FieldsWidget, ItemWidget.
-                // Обновить состояние виджета (вместе со страницей) можно по F5.
+                // Turn off Refresh button, as currently this will not work
+                // correctly with the following widgets:
+                // PermissionWidget, FieldsWidget, ItemWidget.
+                // Update widget state (with the page) with F5.
 
                 // this.buttons.push(new Button({
                 //     label: "Обновить",
@@ -118,7 +116,7 @@ define([
             }
 
             array.forEach(this.buttons, function (btn) {
-                domClass.add(btn.domNode, "dijitButton--primary"); 
+                domClass.add(btn.domNode, "dijitButton--primary");
             });
 
         },
@@ -131,30 +129,30 @@ define([
             }
         },
 
-        // Сериализация и валидация
-        // ========================
+        // Serialization and validation
+        // ============================
 
         validateData: function () {
             var deferred = new Deferred(),
                 promises = [],
                 errors = [];
 
-            // Регистрация ошибки, эта функция передается дочерним
-            // виджетам в качестве параметра
+            // Register error, this function is given to
+            // children widgets as a parameter
             function errback(err) {
                 errors.push(err);
             }
 
             array.forEach(this.members, function (member) {
-                // Валидация может быть асинхронной, в этом случае
-                // member.validate вернет deferred, собираем их в массив
+                // Validation can be asynchronous,
+                // member.validate will return deferred in this case, collect them into an array
                 promises.push(when(member.validateData(errback)).then(
                     function /* callback */ (success) {
-                        // Если валидация завершилась с ошибкой,
-                        // отмечаем заголовок красным цветом
+                        // If validation returned an error
+                        // mark a heading red\
 
-                        if (!success) { 
-                            domClass.add(member.controlButton.domNode, "dijitTabError"); 
+                        if (!success) {
+                            domClass.add(member.controlButton.domNode, "dijitTabError");
                         } else {
                              if(domClass.contains(member.controlButton.domNode, "dijitTabError"))
                                 domClass.remove(member.controlButton.domNode, "dijitTabError");
@@ -168,14 +166,14 @@ define([
                 function /* callback */ (results) {
                     var success = true;
 
-                    // Проверяем результаты всех членов, все должны
-                    // вернуть истинное выражение
+                    // Check results of all members,
+                    // all must return True
                     array.forEach(results, function (res) {
                         success = success && res;
                     });
 
-                    // Так же как и дочерние виждеты составной виджет
-                    // возвращает истину или ложь, и reject в случае ошибки.
+                    // As children widgets, composit widget
+                    // returns True or False and reject if there is an error.
                     deferred.resolve(success);
                 },
 
@@ -216,9 +214,7 @@ define([
         // ========
 
         request: function (args) {
-            var deferred = new Deferred();
-
-            xhr(args.url, {
+            return xhr(args.url, {
                 method: args.method,
                 handleAs: "json",
                 data: json.stringify(args.data),
@@ -226,16 +222,7 @@ define([
                     "Content-Type": "application/json",
                     "Accept": "application/json"
                 }
-            }).then(function (data) {
-                deferred.resolve(data);
-            }, function (err) {
-                deferred.reject({
-                    status: err.response.status,
-                    data: err.response.data
-                });
             });
-
-            return deferred;
         },
 
         storeRequest: function (args) {
@@ -259,28 +246,33 @@ define([
                                         deferred.resolve(response);
                                     },
                                     function /* errback */ (err) {
-                                        console.debug("REST API request failed");
-                                        deferred.reject({
-                                            error: E_REQUEST,
-                                            status: err.status,
-                                            data: err.data
-                                        });
+                                        console.error("REST API request failed");
+                                        deferred.reject({ response: err.response });
                                     }
                                 );
                             },
                             function /* errback */ () {
-                                console.debug("Serialization failed");
-                                deferred.reject({ error: E_SERIALIZE });
+                                console.error("Serialization failed");
+                                deferred.reject({
+                                    title: i18n.gettext("Unexpected error"),
+                                    message: i18n.gettext("Serialization failed")
+                                });
                             }
                         );
                     } else {
                         console.debug("Validation completed without success");
-                        deferred.reject({ error: E_INVALID_DATA });
+                        deferred.reject({
+                            title: i18n.gettext("Validation error"),
+                            message: i18n.gettext("Errors found during data validation. Tabs with errors marked in red.")
+                        });
                     }
                 },
                 function /* errback */ () {
-                    console.debug("Validation failed");
-                    deferred.reject({ error: E_SERIALIZE });
+                    console.error("Validation failed");
+                    deferred.reject({
+                        title: i18n.gettext("Unexpected error"),
+                        message: i18n.gettext("Validation failed")
+                    });
                 }
             );
 
@@ -288,42 +280,24 @@ define([
         },
 
 
-        // Всякие действия и кнопки
-        // ========================
+        // Different actions and buttons
+        // =============================
 
         lock: function () {
             domStyle.set(this.tabContainer.domNode, "display", "none");
             domStyle.set(this.lockContainer.domNode, "display", "block");
-            array.forEach(this.buttons, function (btn) {
-                btn.set("disabled", true);
-            });
+            array.forEach(this.buttons, function (btn) { btn.set("disabled", true) });
         },
 
         unlock: function (err) {
             domStyle.set(this.lockContainer.domNode, "display", "none");
             domStyle.set(this.tabContainer.domNode, "display", "block");
-            array.forEach(this.buttons, function (btn) {
-                btn.set("disabled", false);
-            });
+            array.forEach(this.buttons, function (btn) { btn.set("disabled", false) });
+
             this.tabContainer.resize();
 
-            if (err !== undefined) { this.errorMessage(err); }
-        },
-
-        errorMessage: function (e) {
-            var S_ERROR_MESSAGE = i18n.gettext("Error message:");
-
-            if (e.error == E_REQUEST && e.status == 400) {
-                alert(i18n.gettext("Errors found during data validation on server. Correct them and try again.") + "\n\n" + S_ERROR_MESSAGE + " " + e.data.message);
-
-            } else if (e.error == E_REQUEST && e.status == 403) {
-                alert(i18n.gettext("Insufficient permissions to perform the operation.") + "\n\n" + S_ERROR_MESSAGE + " " + e.data.message);
-
-            } else if (e.error == E_INVALID_DATA) {
-                alert(i18n.gettext("Errors found during data validation. Tabs with errors marked in red."));
-
-            } else {
-                alert(i18n.gettext("Unexpected error occurred during the operation.") + "\n\n" + S_ERROR_MESSAGE + " " + e.data.message);
+            if (err !== undefined) {
+                new ErrorDialog(err).show();
             }
         },
 

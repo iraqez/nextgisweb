@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals, print_function, absolute_import
 import subprocess
-
 from tempfile import NamedTemporaryFile
 from shutil import copy
 
@@ -26,6 +25,8 @@ from ..layer import SpatialLayerMixin, IBboxLayer
 from ..file_storage import FileObj
 
 from .util import _
+
+PYRAMID_TARGET_SIZE = 512
 
 Base = declarative_base()
 
@@ -75,8 +76,10 @@ class RasterLayer(Base, Resource, SpatialLayerMixin):
                 band = ds.GetRasterBand(bidx)
 
                 if band.DataType not in SUPPORTED_GDT:
-                    raise ValidationError(_("Band #%(band)d has type '%(type)s', however only following band types are supported: %(all_types)s.") % dict(
-                        band=bidx, type=gdal.GetDataTypeName(band.DataType), all_types=SUPPORTED_GDT_NAMES))
+                    raise ValidationError(
+                        _("Band #%(band)d has type '%(type)s', however only following band types are supported: %(all_types)s.") % dict(  # NOQA: E501
+                            band=bidx, type=gdal.GetDataTypeName(band.DataType),
+                            all_types=SUPPORTED_GDT_NAMES))
 
         dsproj = ds.GetProjection()
         dsgtran = ds.GetGeoTransform()
@@ -93,7 +96,7 @@ class RasterLayer(Base, Resource, SpatialLayerMixin):
 
         fobj = FileObj(component='raster_layer')
 
-        dst_file = env.file_storage.filename(fobj, makedirs=True)
+        dst_file = env.raster_layer.workdir_filename(fobj, makedirs=True)
         self.fileobj = fobj
 
         if reproject:
@@ -129,9 +132,40 @@ class RasterLayer(Base, Resource, SpatialLayerMixin):
         self.ysize = ds.RasterYSize
         self.band_count = ds.RasterCount
 
+        self.build_overview()
+
     def gdal_dataset(self):
-        fn = env.file_storage.filename(self.fileobj)
+        fn = env.raster_layer.workdir_filename(self.fileobj)
         return gdal.Open(fn, gdalconst.GA_ReadOnly)
+
+    def build_overview(self):
+        fn = env.raster_layer.workdir_filename(self.fileobj)
+        ds = gdal.Open(fn, gdalconst.GA_ReadOnly)
+
+        cursize = max(self.xsize, self.ysize)
+        multiplier = 2
+        levels = []
+
+        while cursize > PYRAMID_TARGET_SIZE:
+            levels.append(str(multiplier))
+            cursize /= 2
+            multiplier *= 2
+
+        cmd = ['gdaladdo', '-q', '-clean', fn]
+
+        env.raster_layer.logger.debug('Removing existing overviews with command: ' + ' '.join(cmd))
+        subprocess.check_call(cmd)
+
+        cmd = [
+            'gdaladdo', '-q', '-ro', '-r', 'cubic',
+            '--config', 'COMPRESS_OVERVIEW', 'JPEG',
+            '--config', 'INTERLEAVE_OVERVIEW', 'PIXEL',
+            '--config', 'BIGTIFF_OVERVIEW', 'YES',
+            fn
+        ] + levels
+
+        env.raster_layer.logger.debug('Building raster overview with command: ' + ' '.join(cmd))
+        subprocess.check_call(cmd)
 
     def get_info(self):
         s = super(RasterLayer, self)
@@ -160,8 +194,8 @@ class RasterLayer(Base, Resource, SpatialLayerMixin):
         x_ul = geoTransform[0]
         y_ul = geoTransform[3]
 
-        x_lr = x_ul + ds.RasterXSize*geoTransform[1] + ds.RasterYSize*geoTransform[2];
-        y_lr = y_ul + ds.RasterXSize*geoTransform[4] + ds.RasterYSize*geoTransform[5];
+        x_lr = x_ul + ds.RasterXSize * geoTransform[1] + ds.RasterYSize * geoTransform[2]
+        y_lr = y_ul + ds.RasterXSize * geoTransform[4] + ds.RasterYSize * geoTransform[5]
 
         ll = ogr.Geometry(ogr.wkbPoint)
         ll.AddPoint(x_ul, y_lr)

@@ -1,93 +1,257 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 import json
-import unicodecsv as csv
+import os
+import re
+import urllib
+import uuid
+import zipfile
+import itertools
+
+import backports.tempfile
 from collections import OrderedDict
-from datetime import date, time, datetime
-from StringIO import StringIO
+from datetime import datetime, date, time
+from io import BytesIO
 
-import geojson
+from osgeo import ogr, gdal
 from shapely import wkt
+from shapely.geometry import mapping
 from pyramid.response import Response
+from pyramid.httpexceptions import HTTPNoContent
 
-from ..resource import DataScope, resource_factory
+from ..geometry import geom_from_wkt, box
+from ..resource import DataScope, ValidationError, Resource, resource_factory
+from ..spatial_ref_sys import SRS
+from .. import geojson
 
-from .interface import IFeatureLayer, IWritableFeatureLayer, FIELD_TYPE
+from .interface import (
+    IFeatureLayer,
+    IWritableFeatureLayer,
+    IFeatureQueryClipByBox,
+    IFeatureQuerySimplify,
+    FIELD_TYPE)
 from .feature import Feature
 from .extension import FeatureExtension
+from .ogrdriver import EXPORT_FORMAT_OGR
+from .util import _
 
 
 PERM_READ = DataScope.read
 PERM_WRITE = DataScope.write
 
 
-class ComplexEncoder(geojson.GeoJSONEncoder):
-    def default(self, obj):
-        try:
-            return geojson.GeoJSONEncoder.default(self, obj)
-        except TypeError:
-            return str(obj)
+def _ogr_memory_ds():
+    return gdal.GetDriverByName(b'Memory').Create(
+        b'', 0, 0, 0, gdal.GDT_Unknown)
+
+
+def _ogr_ds(driver, options):
+    return ogr.GetDriverByName(driver).CreateDataSource(
+        "/vsimem/%s" % uuid.uuid4(), options=options
+    )
+
+
+def _ogr_layer_from_features(layer, features, name=b'', ds=None, fid=None):
+    ogr_layer = layer.to_ogr(ds, name=name, fid=fid)
+    layer_defn = ogr_layer.GetLayerDefn()
+
+    for f in features:
+        ogr_layer.CreateFeature(
+            f.to_ogr(layer_defn, fid=fid))
+
+    return ogr_layer
 
 
 def view_geojson(request):
+    request.GET["format"] = EXPORT_FORMAT_OGR["GEOJSON"].extension
+    request.GET["zipped"] = "false"
+
+    return export(request)
+
+
+def export(request):
     request.resource_permission(PERM_READ)
 
-    class CRSProxy(object):
-        """ Класс обертка добавляющая информацию о системе координат в
-        геоинтерфейс результата запроса векторного слоя """
+    srs = int(
+        request.GET.get("srs", request.context.srs.id)
+    )
+    srs = SRS.filter_by(id=srs).one()
+    fid = request.GET.get("fid")
+    format = request.GET.get("format")
+    encoding = request.GET.get("encoding")
+    zipped = request.GET.get("zipped", "true")
+    zipped = zipped.lower() == "true"
 
-        def __init__(self, query):
-            self.query = query
+    if format is None:
+        raise ValidationError(
+            _("Output format is not provided.")
+        )
+    else:
+        format = format.upper()
 
-        @property
-        def __geo_interface__(self):
-            result = self.query.__geo_interface__
+    if not format in EXPORT_FORMAT_OGR:
+        raise ValidationError(
+            _("Format '%s' is not supported.") % (format,)
+        )
 
-            # TODO: Нужен корректный способ генерации имени СК, пока по ID
-            result['crs'] = dict(type='name', properties=dict(
-                name='EPSG:%d' % request.context.srs_id))
-            return result
+    driver = EXPORT_FORMAT_OGR[format]
+
+    # layer creation options
+    lco = list(driver.options or [])
+
+    if encoding is not None:
+        lco.append("ENCODING=%s" % encoding)
 
     query = request.context.feature_query()
     query.geom()
 
-    content_disposition = (b'attachment; filename=%d.geojson'
-                           % request.context.id)
+    ogr_ds = _ogr_memory_ds()
+    ogr_layer = _ogr_layer_from_features(
+        request.context, query(), ds=ogr_ds, fid=fid)
 
-    result = CRSProxy(query())
+    buf = BytesIO()
+
+    with backports.tempfile.TemporaryDirectory() as temp_dir:
+        filename = "%d.%s" % (
+            request.context.id,
+            driver.extension,
+        )
+
+        vtopts = [
+            '-f', driver.name,
+            '-t_srs', srs.wkt,
+        ] + list(itertools.chain(*[('-lco', o) for o in lco]))
+
+        if driver.fid_support and fid is None:
+            vtopts.append('-preserve_fid')
+
+        gdal.VectorTranslate(
+            os.path.join(temp_dir, filename), ogr_ds,
+            options=gdal.VectorTranslateOptions(options=vtopts)
+        )
+
+        if zipped or not driver.single_file:
+            with zipfile.ZipFile(
+                buf, "w", zipfile.ZIP_DEFLATED
+            ) as zipf:
+                for root, dirs, files in os.walk(temp_dir):
+                    for file in files:
+                        path = os.path.join(root, file)
+                        zipf.write(
+                            path, os.path.basename(path)
+                        )
+
+            content_type = "application/zip"
+            filename = "%s.zip" % (filename,)
+
+        else:
+            content_type = (
+                driver.mime or "application/octet-stream"
+            )
+            with open(
+                os.path.join(temp_dir, filename)
+            ) as f:
+                buf.write(f.read())
+
+    content_disposition = (
+        b"attachment; filename=%s" % filename
+    )
 
     return Response(
-        text=geojson.dumps(result, ensure_ascii=False, cls=ComplexEncoder),
-        content_type=b'application/json',
-        content_disposition=content_disposition)
+        buf.getvalue(),
+        content_type=b"%s" % str(content_type),
+        content_disposition=content_disposition,
+    )
 
 
-def view_csv(request):
-    request.resource_permission(PERM_READ)
+def mvt(request):
+    z = int(request.GET["z"])
+    x = int(request.GET["x"])
+    y = int(request.GET["y"])
 
-    buf = StringIO()
-    writer = csv.writer(buf, dialect='excel')
+    extent = int(request.GET.get('extent', 4096))
+    simplification = float(request.GET.get("simplification", extent / 512))
 
-    headrow = map(lambda fld: fld.keyname, request.context.fields)
-    headrow.append('GEOM')
-    writer.writerow(headrow)
+    resids = map(
+        int,
+        filter(None, request.GET["resource"].split(",")),
+    )
 
-    query = request.context.feature_query()
-    query.geom()
+    # web mercator
+    merc = SRS.filter_by(id=3857).one()
+    minx, miny, maxx, maxy = merc.tile_extent((z, x, y))
 
-    for feature in query():
-        datarow = map(
-            lambda fld: feature.fields[fld.keyname],
-            request.context.fields)
-        datarow.append(feature.geom.wkt)
-        writer.writerow(datarow)
+    # 5% padding by default
+    padding = float(request.GET.get("padding", 0.05))
 
-    content_disposition = (b'attachment; filename=%d.csv'
-                           % request.context.id)
+    bbox = (
+        minx - (maxx - minx) * padding,
+        miny - (maxy - miny) * padding,
+        maxx + (maxx - minx) * padding,
+        maxy + (maxy - miny) * padding,
+    )
+    bbox = box(*bbox, srid=merc.id)
 
-    return Response(
-        buf.getvalue(), content_type=b'text/csv',
-        content_disposition=content_disposition)
+    options = [
+        "FORMAT=DIRECTORY",
+        "TILE_EXTENSION=pbf",
+        "MINZOOM=%d" % z,
+        "MAXZOOM=%d" % z,
+        "EXTENT=%d" % extent,
+        "COMPRESS=NO",
+    ]
+
+    ds = _ogr_ds(b"MVT", options)
+
+    vsibuf = ds.GetName()
+
+    for resid in resids:
+        obj = Resource.filter_by(id=resid).one()
+        request.resource_permission(PERM_READ, obj)
+
+        query = obj.feature_query()
+        query.intersects(bbox)
+        query.geom()
+
+        if IFeatureQueryClipByBox.providedBy(query):
+            query.clip_by_box(bbox)
+
+        if IFeatureQuerySimplify.providedBy(query):
+            tolerance = ((obj.srs.maxx - obj.srs.minx) / (1 << z)) / extent
+            query.simplify(tolerance * simplification)
+
+        _ogr_layer_from_features(
+            obj, query(), name=b"ngw:%d" % obj.id, ds=ds)
+
+    # flush changes
+    ds = None
+
+    filepath = os.path.join(
+        "%s" % vsibuf, "%d" % z, "%d" % x, "%d.pbf" % y
+    )
+
+    try:
+        f = gdal.VSIFOpenL(b"%s" % (filepath,), b"rb")
+
+        if f is not None:
+            # SEEK_END = 2
+            gdal.VSIFSeekL(f, 0, 2)
+            size = gdal.VSIFTellL(f)
+
+            # SEEK_SET = 0
+            gdal.VSIFSeekL(f, 0, 0)
+            content = gdal.VSIFReadL(1, size, f)
+            gdal.VSIFCloseL(f)
+
+            return Response(
+                content,
+                content_type=b"application/vnd.mapbox-vector-tile",
+            )
+        else:
+            return HTTPNoContent()
+
+    finally:
+        gdal.Unlink(b"%s" % (vsibuf,))
 
 
 def deserialize(feat, data):
@@ -138,12 +302,20 @@ def deserialize(feat, data):
                 ext.deserialize(feat, data['extensions'][cls.identity])
 
 
-def serialize(feat):
+def serialize(feat, keys=None, geom_format=None):
     result = OrderedDict(id=feat.id)
-    result['geom'] = wkt.dumps(feat.geom)
+
+    if geom_format is not None and geom_format.lower() == "geojson":
+        geom = mapping(feat.geom)
+    else:
+        geom = wkt.dumps(feat.geom)
+
+    result['geom'] = geom
 
     result['fields'] = OrderedDict()
     for fld in feat.layer.fields:
+        if keys is not None and fld.keyname not in keys:
+            continue
 
         val = feat.fields.get(fld.keyname)
 
@@ -187,8 +359,14 @@ def serialize(feat):
 def iget(resource, request):
     request.resource_permission(PERM_READ)
 
+    geom_format = request.GET.get("geom_format")
+    srs = request.GET.get("srs")
+
     query = resource.feature_query()
     query.geom()
+
+    if srs is not None:
+        query.srs(SRS.filter_by(id=int(srs)).one())
 
     query.filter_by(id=request.matchdict['fid'])
     query.limit(1)
@@ -198,7 +376,7 @@ def iget(resource, request):
         result = f
 
     return Response(
-        json.dumps(serialize(result)),
+        json.dumps(serialize(result, geom_format=geom_format)),
         content_type=b'application/json')
 
 
@@ -236,10 +414,56 @@ def idelete(resource, request):
 def cget(resource, request):
     request.resource_permission(PERM_READ)
 
+    geom_format = request.GET.get("geom_format")
+    srs = request.GET.get("srs")
+
     query = resource.feature_query()
+
+    if srs is not None:
+        query.srs(SRS.filter_by(id=int(srs)).one())
+
+    # Paging
+    limit = request.GET.get('limit')
+    offset = request.GET.get('offset', 0)
+    if limit is not None:
+        query.limit(int(limit), int(offset))
+
+    # Filtering by attributes
+    filter_ = []
+    keys = [fld.keyname for fld in resource.fields]
+    for key in filter(lambda k: k.startswith('fld_'), request.GET.keys()):
+        try:
+            fld_key, operator = key.rsplit('__', 1)
+        except ValueError:
+            fld_key, operator = (key, 'eq')
+
+        if fld_key in ['fld_%s' % k for k in keys]:
+            filter_.append((re.sub('^fld_', '', fld_key), operator, request.GET[key]))
+
+    if filter_:
+        query.filter(*filter_)
+
+    # Filtering by extent
+    wkt = request.GET.get('intersects')
+    if wkt is not None:
+        geom = geom_from_wkt(wkt, srid=resource.srs.id)
+        query.intersects(geom)
+
+    # Selected fields
+    fields = request.GET.get('fields')
+    if fields is not None:
+        field_list = fields.split(',')
+        fields = [key for key in keys if key in field_list]
+
+    if fields:
+        query.fields(*fields)
+
     query.geom()
 
-    result = map(serialize, query())
+    result = [
+        serialize(feature, fields, geom_format=geom_format)
+        for feature in query()
+    ]
 
     return Response(
         json.dumps(result),
@@ -290,9 +514,19 @@ def cpatch(resource, request):
 
 def cdelete(resource, request):
     request.resource_permission(PERM_WRITE)
-    resource.feature_delete_all()
 
-    return Response(json.dumps(None), content_type=b'application/json')
+    if request.body and request.json_body:
+        result = []
+        for fdata in request.json_body:
+            if 'id' in fdata:
+                fid = fdata['id']
+                resource.feature_delete(fid)
+                result.append(fid)
+    else:
+        resource.feature_delete_all()
+        result = True
+
+    return Response(json.dumps(result), content_type=b'application/json')
 
 
 def count(resource, request):
@@ -306,6 +540,63 @@ def count(resource, request):
         content_type=b'application/json')
 
 
+def store_collection(layer, request):
+    request.resource_permission(PERM_READ)
+
+    query = layer.feature_query()
+
+    http_range = request.headers.get('range')
+    if http_range and http_range.startswith('items='):
+        first, last = map(int, http_range[len('items='):].split('-', 1))
+        query.limit(last - first + 1, first)
+
+    field_prefix = json.loads(
+        urllib.unquote(request.headers.get('x-field-prefix', '""')))
+    pref = lambda (f): field_prefix + f
+
+    field_list = json.loads(
+        urllib.unquote(request.headers.get('x-field-list', "[]")))
+    if len(field_list) > 0:
+        query.fields(*field_list)
+
+    box = request.headers.get('x-feature-box')
+    if box:
+        query.box()
+
+    like = request.params.get('like', '')
+    if like != '':
+        query.like(like)
+
+    sort_re = re.compile(r'sort\(([+-])%s(\w+)\)' % (field_prefix, ))
+    sort = sort_re.search(urllib.unquote(request.query_string))
+    if sort:
+        sort_order = {'+': 'asc', '-': 'desc'}[sort.group(1)]
+        sort_colname = sort.group(2)
+        query.order_by((sort_order, sort_colname), )
+
+    features = query()
+
+    result = []
+    for fobj in features:
+        fdata = dict(
+            [(pref(k), v) for k, v in fobj.fields.iteritems()],
+            id=fobj.id, label=fobj.label)
+        if box:
+            fdata['box'] = fobj.box.bounds
+
+        result.append(fdata)
+
+    headers = dict()
+    headers[str('Content-Type')] = str('application/json')
+
+    if http_range:
+        total = features.total_count
+        last = min(total - 1, last)
+        headers[str('Content-Range')] = str('items %d-%s/%d' % (first, last, total))
+
+    return Response(json.dumps(result, cls=geojson.Encoder), headers=headers)
+
+
 def setup_pyramid(comp, config):
     config.add_route(
         'feature_layer.geojson', '/api/resource/{id}/geojson',
@@ -313,9 +604,13 @@ def setup_pyramid(comp, config):
         .add_view(view_geojson, context=IFeatureLayer, request_method='GET')
 
     config.add_route(
-        'feature_layer.csv', '/api/resource/{id}/csv',
+        'feature_layer.export', '/api/resource/{id}/export',
         factory=resource_factory) \
-        .add_view(view_csv, context=IFeatureLayer, request_method='GET')
+        .add_view(export, context=IFeatureLayer, request_method='GET')
+
+    config.add_route(
+        'feature_layer.mvt', '/api/component/feature_layer/mvt') \
+        .add_view(mvt, request_method='GET')
 
     config.add_route(
         'feature_layer.feature.item', '/api/resource/{id}/feature/{fid}',
@@ -338,8 +633,12 @@ def setup_pyramid(comp, config):
         factory=resource_factory) \
         .add_view(count, context=IFeatureLayer, request_method='GET')
 
-    # Legacy route
     config.add_route(
-        '#feature_layer.geojson', '/resource/{id:\d+}/geojson/',
+        'feature_layer.store', '/api/resource/{id:\d+}/store/',
         factory=resource_factory) \
-        .add_view(view_geojson, context=IFeatureLayer, request_method='GET')
+        .add_view(store_collection, context=IFeatureLayer, request_method='GET')
+
+    from .identify import identify
+    config.add_route(
+        'feature_layer.identify', '/api/feature_layer/identify') \
+        .add_view(identify, request_method='POST')

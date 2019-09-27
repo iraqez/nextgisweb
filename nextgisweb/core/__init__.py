@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import division, absolute_import, print_function, unicode_literals
 import os
 import os.path
 import json
@@ -41,6 +42,9 @@ class CoreComponent(Component):
         setting_debug = self._settings.get('debug', 'false').lower()
         self.debug = setting_debug in ('true', 'yes', '1')
 
+        if 'support_url' not in self._settings:
+            self._settings['support_url'] = "http://nextgis.com/contact/"
+
         sa_url = make_engine_url(EngineURL(
             'postgresql+psycopg2',
             host=self._settings.get('database.host', 'localhost'),
@@ -62,14 +66,26 @@ class CoreComponent(Component):
 
         self.DBSession = DBSession
 
-        if 'backup.filename' not in self.settings:
-            self.settings['backup.filename'] = '%y%m%d-%H%M%S'
+        self._backup_path = self.settings.get('backup.filename')
+        self._backup_filename = self.settings.get(
+            'backup.filename', '%Y%m%d-%H%M%S')
+
+        self._backup_upload_bucket = self.settings.get(
+            'backup_upload.bucket', 'ngwbackup')
+        self._backup_upload_server = self.settings.get('backup_upload.server')
+        self._backup_upload_access_key = self.settings.get(
+            'backup_upload.access_key')
+        self._backup_upload_secret_key = self.settings.get(
+            'backup_upload.secret_key')
 
     def initialize_db(self):
-        for k, v in (('system.name', 'NextGIS Web'),
-                     ('system.full_name',
-                      self.localizer().translate(
-                          _('NextGIS geoinformation system')))):
+        for k, v in (
+            ('system.name', 'NextGIS Web'),
+            ('system.full_name', self.localizer().translate(
+                _('NextGIS geoinformation system'))),
+            ('units', 'metric'),
+            ('degree_format', 'dd')
+        ):
             self.init_settings(self.identity, k, self._settings.get(k, v))
 
     def backup(self):
@@ -132,6 +148,11 @@ class CoreComponent(Component):
         self._localizer[locale] = lobj
         return lobj
 
+    def settings_exists(self, component, name):
+        return DBSession.query(db.exists().where(db.and_(
+            Setting.component == component, Setting.name == name
+        ))).scalar()
+
     def settings_get(self, component, name):
         try:
             obj = Setting.filter_by(component=component, name=name).one()
@@ -146,6 +167,13 @@ class CoreComponent(Component):
             obj = Setting(component=component, name=name).persist()
         obj.value = json.dumps(value)
 
+    def settings_delete(self, component, name):
+        try:
+            DBSession.delete(Setting.filter_by(
+                component=component, name=name).one())
+        except NoResultFound:
+            pass
+
     def init_settings(self, component, name, value):
         try:
             self.settings_get(component, name)
@@ -158,27 +186,37 @@ class CoreComponent(Component):
             result['full_name'] = self.settings_get('core', 'system.full_name')
         except KeyError:
             pass
+
+        result['database_size'] = DBSession.query(db.func.pg_database_size(
+            db.func.current_database(),)).scalar()
+
         return result
 
     settings_info = (
-        dict(key='system.name', default=u"NextGIS Web", desc=u"Название системы"),
-        dict(key='system.full_name', default=u"Геоинформационная система NextGIS", desc=u"Полное название системы"),
+        dict(key='system.name', default="NextGIS Web", desc="GIS name"),
+        dict(key='system.full_name', default="NextGIS Web", desc="Full GIS nane"),
 
-        dict(key='database.host', default='localhost', desc=u"Имя сервера БД"),
-        dict(key='database.name', default='nextgisweb', desc=u"Имя БД на сервере"),
-        dict(key='database.user', default='nextgisweb', desc=u"Имя пользователя БД"),
-        dict(key='database.password', desc=u"Пароль пользователя БД"),
+        dict(key='database.host', default='localhost', desc="DB server name"),
+        dict(key='database.name', default='nextgisweb', desc="DB name on the server"),
+        dict(key='database.user', default='nextgisweb', desc="DB user name"),
+        dict(key='database.password', desc="DB user password"),
 
-        dict(key='database.check_at_startup', desc=u"Проверять подключение при запуске"),
+        dict(key='database.check_at_startup', desc="Check connection of startup"),
 
-        dict(key='packages.ignore', desc=u"Не загружать перечисленные пакеты"),
-        dict(key='components.ignore', desc=u"Не загружать перечисленные компоненты"),
+        dict(key='packages.ignore', desc="Ignore listed packages"),
+        dict(key='components.ignore', desc="Ignore listed components"),
 
-        dict(key='locale.default', desc=u"Локаль, используемая по-умолчанию"),
-        dict(key='locale.available', desc=u"Доступные локали"),
-        dict(key='debug', desc=u"Дополнительный инструментарий для отладки"),
-        dict(key='sdir', desc=u"Директория для хранения данных"),
+        dict(key='locale.default', desc="Default locale"),
+        dict(key='locale.available', desc="Available locale"),
+        dict(key='debug', desc="Additional debug tools"),
+        dict(key='sdir', desc="Data storage folder"),
 
-        dict(key='permissions.disable_check.rendering', desc=u"Отключение проверки прав при рендеринге слоев"),
-        dict(key='permissions.disable_check.identify', desc=u"Отключение проверки прав при получении информации об объектах"),
+        dict(key='support_url', desc="Support URL"),
+
+        dict(
+            key='permissions.disable_check.rendering',
+            desc="Turn off permission checking for rendering"),
+        dict(
+            key='permissions.disable_check.identify',
+            desc="Turn off permission checking for identification"),
     )

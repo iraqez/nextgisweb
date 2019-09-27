@@ -153,7 +153,7 @@ class NextgiswebDatasource(DataSource):
                             message='Field name %s contains unsupported symbol' % (field_name, ))
                 fields_checked = True
 
-            feature = Feature(id=row.id, props=row.fields, srs=self.srid_out)
+            feature = Feature(id=row.id, props=row.fields, srs=srid)
             feature.geometry_attr = self.geom_col
             geom = geojson.dumps(row.geom)
 
@@ -192,9 +192,9 @@ class NextgiswebDatasource(DataSource):
                             feat.fields[field_name] = None
                         else:
                             feat.fields[field_name] = data[field_name]
-                # Update geometries if needed:
-                if data.has_key('geom'):
-                    geom = self._geom_from_gml(data['geom'])
+                # Update geometries if needed
+                if self.geom_col in data:
+                    geom = self._geom_from_gml(data[self.geom_col])
                     feat.geom = geom
 
                 self.layer.feature_put(feat)

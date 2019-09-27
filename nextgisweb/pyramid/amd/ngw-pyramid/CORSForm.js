@@ -9,6 +9,7 @@ define([
     "dojo/request/xhr",
     "dojo/json",
     "ngw/route",
+    "ngw-pyramid/ErrorDialog/ErrorDialog",
     "ngw-pyramid/i18n!pyramid",
     "ngw-pyramid/hbs-i18n",
     "dojo/text!./template/CORSForm.hbs",
@@ -27,6 +28,7 @@ define([
     xhr,
     json,
     route,
+    ErrorDialog,
     i18n,
     hbsI18n,
     template
@@ -61,9 +63,12 @@ define([
             olist = array.filter(olist, function (i) { return i !== ''; });
             xhr.put(API_URL, {
                 handleAs: 'json',
-                headers: { "Content-Type": "application/json" },                
-                data: json.stringify({allow_origin: olist}) 
-            }).then(function () {}, function () { alert("Error!"); });
+                headers: { "Content-Type": "application/json" },
+                data: json.stringify({allow_origin: olist})
+            }).then(
+                function () {},
+                function (err) { new ErrorDialog({response: err}).show() }
+            );
         }
     });
 });

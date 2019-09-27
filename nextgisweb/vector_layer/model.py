@@ -8,11 +8,9 @@ import zipfile
 import tempfile
 import shutil
 import ctypes
-import operator
-import osgeo
 
-from datetime import datetime
-from distutils.version import LooseVersion
+from backports.functools_lru_cache import lru_cache
+from datetime import datetime, time, date
 from zope.interface import implements
 from osgeo import ogr, osr
 
@@ -44,12 +42,17 @@ from ..models import declarative_base, DBSession
 from ..layer import SpatialLayerMixin, IBboxLayer
 
 from ..feature_layer import (
+    gdal_gt_19,
+    gdal_gt_20,
+    gdal_gt_22,
     Feature,
     FeatureSet,
     LayerField,
     LayerFieldsMixin,
     GEOM_TYPE,
+    GEOM_TYPE_OGR,
     FIELD_TYPE,
+    FIELD_TYPE_OGR,
     IFeatureLayer,
     IWritableFeatureLayer,
     IFeatureQuery,
@@ -57,28 +60,14 @@ from ..feature_layer import (
     IFeatureQueryFilterBy,
     IFeatureQueryLike,
     IFeatureQueryIntersects,
-    IFeatureQueryOrderBy)
+    IFeatureQueryOrderBy,
+    IFeatureQueryClipByBox,
+    IFeatureQuerySimplify)
 
 from .util import _
 
-gdal_gt_19 = LooseVersion(osgeo.__version__) >= LooseVersion('1.9')
-gdal_gt_20 = LooseVersion(osgeo.__version__) >= LooseVersion('2.0')
-
 GEOM_TYPE_DB = ('POINT', 'LINESTRING', 'POLYGON',
                 'MULTIPOINT', 'MULTILINESTRING', 'MULTIPOLYGON')
-GEOM_TYPE_OGR = (
-    ogr.wkbPoint,
-    ogr.wkbLineString,
-    ogr.wkbPolygon,
-    ogr.wkbMultiPoint,
-    ogr.wkbMultiLineString,
-    ogr.wkbMultiPolygon,
-    ogr.wkbPoint25D,
-    ogr.wkbLineString25D,
-    ogr.wkbPolygon25D,
-    ogr.wkbMultiPoint25D,
-    ogr.wkbMultiLineString25D,
-    ogr.wkbMultiPolygon25D)
 GEOM_TYPE_DISPLAY = (_("Point"), _("Line"), _("Polygon"),
                      _("Multipoint"), _("Multiline"), _("Multipolygon"))
 
@@ -91,16 +80,7 @@ FIELD_TYPE_DB = (
     db.Time,
     db.DateTime)
 
-FIELD_TYPE_OGR = (
-    ogr.OFTInteger,
-    ogr.OFTInteger64 if gdal_gt_20 else None,
-    ogr.OFTReal,
-    ogr.OFTString,
-    ogr.OFTDate,
-    ogr.OFTTime,
-    ogr.OFTDateTime)
-
-FIELD_FORBIDDEN_NAME = ("id", "type", "source")
+FIELD_FORBIDDEN_NAME = ("id", "geom")
 
 _GEOM_OGR_2_TYPE = dict(zip(GEOM_TYPE_OGR, GEOM_TYPE.enum * 2))
 _GEOM_TYPE_2_DB = dict(zip(GEOM_TYPE.enum, GEOM_TYPE_DB))
@@ -157,7 +137,9 @@ class TableInfo(object):
         defn = ogrlayer.GetLayerDefn()
         for i in range(defn.GetFieldCount()):
             fld_defn = defn.GetFieldDefn(i)
-            fld_name = fld_defn.GetNameRef()
+
+            # TODO: Fix invalid field names as done for attributes.
+            fld_name = strdecode(fld_defn.GetNameRef())
             if fld_name.lower() in FIELD_FORBIDDEN_NAME:
                 raise VE(_("Field name is forbidden: '%s'. Please remove or rename it.") % fld_name)
 
@@ -308,7 +290,8 @@ class TableInfo(object):
             for i in range(feature.GetFieldCount()):
                 fld_type = feature.GetFieldDefnRef(i).GetType()
 
-                if not feature.IsFieldSet(i):
+                if (not feature.IsFieldSet(i) or
+                        (gdal_gt_22 and feature.IsFieldNull(i))):
                     fld_value = None
                 elif fld_type == ogr.OFTInteger:
                     fld_value = feature.GetFieldAsInteger(i)
@@ -316,8 +299,17 @@ class TableInfo(object):
                     fld_value = feature.GetFieldAsInteger64(i)
                 elif fld_type == ogr.OFTReal:
                     fld_value = feature.GetFieldAsDouble(i)
-                elif fld_type in [ogr.OFTDate, ogr.OFTTime, ogr.OFTDateTime]:
-                    fld_value = datetime(*feature.GetFieldAsDateTime(i))
+                elif fld_type == ogr.OFTDate:
+                    year, month, day = feature.GetFieldAsDateTime(i)[0:3]
+                    fld_value = date(year, month, day)
+                elif fld_type == ogr.OFTTime:
+                    hour, minute, second = feature.GetFieldAsDateTime(i)[3:6]
+                    fld_value = time(hour, minute, int(second))
+                elif fld_type == ogr.OFTDateTime:
+                    year, month, day, hour, minute, second, tz = \
+                        feature.GetFieldAsDateTime(i)
+                    fld_value = datetime(year, month, day,
+                                         hour, minute, int(second))
                 elif fld_type == ogr.OFTIntegerList:
                     fld_value = json.dumps(feature.GetFieldAsIntegerList(i))
                 elif gdal_gt_20 and fld_type == ogr.OFTInteger64List:
@@ -338,8 +330,8 @@ class TableInfo(object):
                             "Try declaring different encoding.") % dict(
                             feat=fid, attr=i))
 
-                fld_values[self[feature.GetFieldDefnRef(i).GetNameRef()].key] \
-                    = fld_value
+                fld_name = strdecode(feature.GetFieldDefnRef(i).GetNameRef())
+                fld_values[self[fld_name].key] = fld_value
 
             obj = self.model(fid=fid, geom=ga.elements.WKTElement(
                 str(geom), srid=self.srs_id), **fld_values)
@@ -780,6 +772,15 @@ class VectorLayerSerializer(Serializer):
     fields = _fields_attr(read=None, write=P_DS_WRITE)
 
 
+@lru_cache()
+def _clipbybox2d_exists():
+    return (
+        DBSession.connection()
+        .execute("SELECT 1 FROM pg_proc WHERE proname='st_clipbybox2d'")
+        .fetchone()
+    )
+
+
 class FeatureQueryBase(object):
     implements(
         IFeatureQuery,
@@ -787,11 +788,15 @@ class FeatureQueryBase(object):
         IFeatureQueryFilterBy,
         IFeatureQueryLike,
         IFeatureQueryIntersects,
-        IFeatureQueryOrderBy)
+        IFeatureQueryOrderBy,
+        IFeatureQueryClipByBox,
+        IFeatureQuerySimplify)
 
     def __init__(self):
         self._srs = None
         self._geom = None
+        self._clip_by_box = None
+        self._simplify = None
         self._single_part_geom = None
         self._box = None
 
@@ -815,6 +820,12 @@ class FeatureQueryBase(object):
     def geom(self, single_part=False):
         self._geom = True
         self._single_part = single_part
+
+    def clip_by_box(self, box):
+        self._clip_by_box = box
+
+    def simplify(self, tolerance):
+        self._simplify = tolerance
 
     def geom_length(self):
         self._geom_len = True
@@ -863,6 +874,23 @@ class FeatureQueryBase(object):
         geomcol = table.columns.geom
         geomexpr = db.func.st_transform(geomcol, srsid)
 
+        if self._clip_by_box is not None:
+            if _clipbybox2d_exists():
+                clip = db.func.st_setsrid(
+                    db.func.st_makeenvelope(*self._clip_by_box.bounds),
+                    self._clip_by_box.srid)
+                geomexpr = db.func.st_clipbybox2d(geomexpr, clip)
+            else:
+                clip = db.func.st_setsrid(
+                    db.func.st_geomfromtext(self._clip_by_box.wkt),
+                    self._clip_by_box.srid)
+                geomexpr = db.func.st_intersection(geomexpr, clip)
+
+        if self._simplify is not None:
+            geomexpr = db.func.st_simplifypreservetopology(
+                geomexpr, self._simplify
+            )
+
         if self._geom:
             if self._single_part:
 
@@ -905,8 +933,36 @@ class FeatureQueryBase(object):
         if self._filter:
             l = []
             for k, o, v in self._filter:
-                op = getattr(operator, o)
-                if k == 'id':
+                supported_operators = (
+                    "eq",
+                    "ge",
+                    "gt",
+                    "ilike",
+                    "in",
+                    "le",
+                    "like",
+                    "lt",
+                    "ne",
+                    "notin",
+                    "startswith",
+                )
+                if o not in supported_operators:
+                    raise ValueError(
+                        "Invalid operator '%s'. Only %r are supported."
+                        % (o, supported_operators)
+                    )
+
+                if o in [
+                    "ilike",
+                    "in",
+                    "like",
+                    "notin",
+                    "startswith",
+                ]:
+                    o += "_op"
+
+                op = getattr(db.sql.operators, o)
+                if k == "id":
                     l.append(op(table.columns.id, v))
                 else:
                     l.append(op(table.columns[tableinfo[k].key], v))
@@ -931,9 +987,11 @@ class FeatureQueryBase(object):
         if self._like:
             l = []
             for f in tableinfo.fields:
-                if f.datatype == FIELD_TYPE.STRING:
-                    l.append(table.columns[f.key].ilike(
-                        '%' + self._like + '%'))
+                l.append(
+                    cast(table.columns[f.key], db.Unicode).ilike(
+                        "%" + self._like + "%"
+                    )
+                )
 
             where.append(db.or_(*l))
 

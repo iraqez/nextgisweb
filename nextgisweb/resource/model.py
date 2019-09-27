@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-from __future__ import unicode_literals
+from __future__ import division, absolute_import, print_function, unicode_literals
 from collections import namedtuple, OrderedDict
+from datetime import datetime
 
 from bunch import Bunch
 
@@ -18,7 +19,7 @@ from .serialize import (
     SerializedRelationship as SR,
     SerializedResourceRelationship as SRR)
 from .scope import ResourceScope, MetadataScope
-from .exception import ValidationError, Forbidden
+from .exception import ValidationError, HierarchyError, ForbiddenError, DisplayNameNotUnique
 
 __all__ = ['Resource', ]
 
@@ -111,6 +112,8 @@ class Resource(Base):
 
     keyname = db.Column(db.Unicode, unique=True)
     display_name = db.Column(db.Unicode, nullable=False)
+    creation_date = db.Column(db.TIMESTAMP, nullable=False,
+                              default=datetime.utcnow)
 
     owner_user_id = db.Column(db.ForeignKey(User.id), nullable=False)
 
@@ -176,8 +179,8 @@ class Resource(Base):
         for res in tuple(self.parents) + (self, ):
             rules = filter(lambda (rule): (
                 (rule.propagate or res == self)
-                and rule.cmp_identity(self.identity)
-                and rule.cmp_user(user)),
+                and rule.cmp_identity(self.identity)  # NOQA: W503
+                and rule.cmp_user(user)),  # NOQA: W503
                 res.acl)
 
             for rule in rules:
@@ -193,7 +196,7 @@ class Resource(Base):
                 for a in class_permissions:
                     if req.dst == a and (
                         req.cls is None
-                        or isinstance(self, req.cls)
+                        or isinstance(self, req.cls)  # NOQA: W503
                     ):
                         if req.attr is None:
                             p = req.src in allow \
@@ -236,7 +239,7 @@ class Resource(Base):
         with DBSession.no_autoflush:
             if value is not None:
                 if self == value or self in value.parents:
-                    raise ValidationError(_("Resource can not be a parent himself."))
+                    raise HierarchyError(_("Resource can not be a parent himself."))
 
         return value
 
@@ -274,10 +277,14 @@ class _parent_attr(SRR):
         if srlzr.obj.parent is None or not srlzr.obj.parent.has_permission(
             ResourceScope.manage_children, srlzr.user
         ):
-            raise Forbidden()
+            raise ForbiddenError(
+                _("You are not allowed to manage children of resource with id = %d.")
+                % srlzr.obj.parent.id)
 
         if not srlzr.obj.check_parent(srlzr.obj.parent):
-            raise ValidationError(_("Resource can not be a child of resource ID=%d.") % srlzr.obj.parent.id)
+            raise HierarchyError(
+                _("Resource can not be a child of resource id = %d.")
+                % srlzr.obj.parent.id)
 
 
 class _perms_attr(SP):
@@ -347,6 +354,7 @@ class ResourceSerializer(Serializer):
 
     id = _ro(SP)
     cls = _ro(SP)
+    creation_date = _ro(SP)
 
     parent = _rw(_parent_attr)
     owner_user = _ro(SR)
@@ -382,7 +390,44 @@ class ResourceSerializer(Serializer):
                 ).first()
 
             if conflict is not None:
-                raise ValidationError(_("Resource display name is not unique. Resource with same name already exists (ID=%d).") % conflict.id)
+                raise DisplayNameNotUnique(conflict.id)
+
+        # Total quota checking
+        quota_resource_cls = env.resource.quota_resource_cls
+        quota_limit = env.resource.quota_limit
+
+        if (
+            quota_limit is not None and self.obj.id is None
+            and (quota_resource_cls is None or self.obj.cls in quota_resource_cls)  # NOQA: W503
+        ):
+            query = DBSession.query(db.func.count(Resource.id))
+            if quota_resource_cls is not None:
+                query = query.filter(Resource.cls.in_(quota_resource_cls))
+
+            with DBSession.no_autoflush:
+                count = query.scalar()
+
+            if count >= quota_limit:
+                raise ValidationError(_(
+                    "Maximum number of resources exceeded. The limit is %s."
+                ) % (quota_limit,))
+
+        # Quota per resource class checking
+        quota_resource_by_cls = env.resource.quota_resource_by_cls
+
+        if self.obj.id is None and self.obj.cls in quota_resource_by_cls:
+            query = DBSession\
+                .query(db.func.count(Resource.id))\
+                .filter(Resource.cls == self.obj.cls)
+
+            with DBSession.no_autoflush:
+                count = query.scalar()
+
+            quota = quota_resource_by_cls[self.obj.cls]
+            if count >= quota:
+                raise ValidationError(_(
+                    "Maximum number of resources '%s' exceeded. The limit is %s."
+                ) % (self.obj.cls_display_name, quota))
 
 
 class ResourceACLRule(Base):
@@ -430,8 +475,8 @@ class ResourceACLRule(Base):
         pscope = permission.scope.identity
 
         return ((self.scope == '' and self.permission == '')
-                or (self.scope == pscope and self.permission == '')
-                or (self.scope == pscope and self.permission == pname))
+                or (self.scope == pscope and self.permission == '')  # NOQA: W503
+                or (self.scope == pscope and self.permission == pname))  # NOQA: W503
 
 
 class ResourceGroup(Resource):

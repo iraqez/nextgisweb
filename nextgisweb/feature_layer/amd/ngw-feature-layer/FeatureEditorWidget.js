@@ -12,7 +12,6 @@ define([
     "dijit/form/NumberTextBox",
     "dijit/form/DateTextBox",
     "dijit/form/TimeTextBox",
-    "dijit/form/CheckBox",
     "dijit/layout/ContentPane",
     "dijit/layout/BorderContainer",
     "dijit/layout/TabContainer",
@@ -36,7 +35,6 @@ define([
     NumberTextBox,
     DateTextBox,
     TimeTextBox,
-    CheckBox,
     ContentPane,
     BorderContainer,
     TabContainer,
@@ -49,17 +47,18 @@ define([
     var MultiBox = declare([_WidgetBase], {
         datatype: "STRING",
 
+        isNull: false,
+
+        style: "display: flex; align-items: center",
+
         buildRendering: function () {
             this.domNode = domConstruct.create("div");
             this.buildWidget();
         },
 
         buildWidget: function() {
-            this.nullbox = new CheckBox({
-                style: "margin-right: 1ex;"
-            }).placeAt(this);
-
-            if (this.datatype == "INTEGER") {
+            if ((this.datatype == "INTEGER") ||
+                (this.datatype == "BIGINT")) {
                 this.children = [
                     (new NumberTextBox({
                         constraints: {fractional: false},
@@ -77,7 +76,7 @@ define([
                 this.children = [
                     (new RTETextBox({
                         label: i18n.gettext("Attribute: ") + this.label,
-                        style: "width: calc(100% - 40px - 1ex)"
+                        style: "flex-grow: 1"
                     })).placeAt(this)
                 ];
             } else if (this.datatype == "DATE") {
@@ -113,24 +112,40 @@ define([
             }
 
             var widget = this;
-            this.nullbox.watch("checked", function (attr, oval, nval) {
-                array.forEach(widget.children, function (c) {
-                    c.set("disabled", !nval);
-                }, this);
+            array.forEach(this.children, function (c) {
+                c.onFocus = function () {
+                    widget.set("isNull", false);
+                };
             });
 
-            this.nullbox.set("checked", true);
-            this.nullbox.set("checked", false);
+            this.nullbtn = new Button({
+                style: "margin-left: 1ex;",
+                label: i18n.gettext("Set NULL"),
+                title: i18n.gettext("Set field value to NULL (No data)"),
+                onClick: function () {
+                    widget.set("isNull", true);
+                }
+            }).placeAt(this);
+
+            this.watch("isNull", function (attr, oval, nval) {
+                array.forEach(widget.children, function (c) {
+                    if (nval) {
+                        c.set("value", null);
+                    }
+                    c.set("placeHolder", nval ? i18n.gettext("NULL") : "");
+                });
+            });
         },
 
         _setValueAttr: function (value) {
             this._set("value", value);
-            this.nullbox.set("checked", value !== null);
+            this.set("isNull", value === null);
 
-            if (this.datatype == "INTEGER" || this.datatype == "REAL") {
-                this.children[0].set("value", value === null ? 0 : value);
+            if (this.datatype == "INTEGER" || this.datatype == "BIGINT" ||
+                this.datatype == "REAL") {
+                this.children[0].set("value", value);
             } else if (this.datatype == "STRING") {
-                this.children[0].set("value", value === null ? "" : value);
+                this.children[0].set("value", value);
             } else if (this.datatype == "DATE") {
                 var fp = function (v, p) { return number.format(v, {pattern: p}); };
                 this.children[0].set("value", value === null ? null : new Date(value.year, value.month - 1, value.day));
@@ -143,11 +158,9 @@ define([
         },
 
         _getValueAttr: function () {
-            if (this.nullbox.get("checked") === false) { return null; }
+            if (this.isNull) { return null; }
 
-            if (this.datatype == "INTEGER" || this.datatype == "REAL" || this.datatype == "STRING") {
-                return this.children[0].get("value");
-            } else if (this.datatype == "DATE") {
+            if (this.datatype == "DATE") {
                 var v = this.children[0].get("value");
                 return {
                     year: v.getFullYear(),
@@ -160,8 +173,8 @@ define([
                     minute: v.getMinutes(),
                     second: v.getSeconds() };
             } else if (this.datatype == "DATETIME") {
-                var d = this.children[0].get("value");
-                var t = this.children[1].get("value");
+                var d = this.children[0].get("value") || new Date();
+                var t = this.children[1].get("value") || new Date();
                 return {
                     year: d.getFullYear(),
                     month: d.getMonth() + 1,
@@ -169,6 +182,8 @@ define([
                     hour: t.getHours(),
                     minute: t.getMinutes(),
                     second: t.getSeconds() };
+            } else {
+                return this.children[0].get("value");
             }
         }
     });
@@ -259,7 +274,8 @@ define([
 
             xhr(this.iurl(), {
                 method: "GET",
-                handleAs: "json"
+                handleAs: "json",
+                preventCache: true,
             }).then(function (data) {
                 widget._fwidget.set("value", data.fields);
                 for (var k in loader) {

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals, print_function, absolute_import
+import os
 import codecs
-from ConfigParser import ConfigParser
+from ConfigParser import RawConfigParser
 
 from pyramid.config import Configurator
 from pyramid.paster import setup_logging
@@ -59,8 +60,12 @@ def main(global_config, **settings):
     if 'logging' in settings:
         setup_logging(settings['logging'])
 
-    cfg = ConfigParser()
+    cfg = RawConfigParser()
     cfg.readfp(codecs.open(settings['config'], 'r', 'utf-8'))
+
+    for section in cfg.sections():
+        for item, value in cfg.items(section):
+            cfg.set(section, item, value % os.environ)
 
     env = Env(cfg)
     env.initialize()
@@ -83,8 +88,10 @@ def amd_packages():
         ('dgrid', 'nextgisweb:amd_packages/contrib/dgrid'),
         ('handlebars', 'nextgisweb:amd_packages/contrib/handlebars'),
         ('openlayers', 'nextgisweb:amd_packages/contrib/openlayers'),
+        ('dom-to-image', 'nextgisweb:amd_packages/contrib/dom-to-image'),
         ('svg4everybody', 'nextgisweb:amd_packages/contrib/svg4everybody'),
         ('codemirror', 'nextgisweb:amd_packages/contrib/codemirror'),
+        ('jquery', 'nextgisweb:amd_packages/contrib/jquery'),
 
         # nextgisweb packages
         ('ngw', 'nextgisweb:amd_packages/ngw'),

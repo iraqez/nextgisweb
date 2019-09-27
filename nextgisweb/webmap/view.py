@@ -4,7 +4,7 @@ from collections import namedtuple
 from ..resource import Widget, resource_factory
 from ..dynmenu import DynItem, Label, Link
 
-from .model import WebMap
+from .model import WebMap, WebMapScope
 from .plugin import WebmapPlugin, WebmapLayerPlugin
 from .adapter import WebMapAdapter
 from .util import _
@@ -23,8 +23,13 @@ class ItemWidget(Widget):
     amdmod = 'ngw-webmap/ItemWidget'
 
 
-def setup_pyramid(comp, config):
+class SettingsWidget(Widget):
+    resource = WebMap
+    operation = ('create', 'update')
+    amdmod = 'ngw-webmap/resource/OtherSettings/OtherSettings'
 
+
+def setup_pyramid(comp, config):
     def display(obj, request):
         request.resource_permission(WebMap.scope.webmap.display)
 
@@ -41,7 +46,7 @@ def setup_pyramid(comp, config):
         for pcls in WebmapPlugin.registry:
             p_mid_data = pcls.is_supported(obj)
             if p_mid_data:
-                plugin.update((p_mid_data, ))
+                plugin.update((p_mid_data,))
 
         def traverse(item):
             data = dict(
@@ -74,6 +79,7 @@ def setup_pyramid(comp, config):
                     transparency=item.layer_transparency,
                     minScaleDenom=item.layer_min_scale_denom,
                     maxScaleDenom=item.layer_max_scale_denom,
+                    drawOrderPosition=item.draw_order_position,
                 )
 
                 data['adapter'] = WebMapAdapter.registry.get(
@@ -85,7 +91,7 @@ def setup_pyramid(comp, config):
                 for pcls in WebmapLayerPlugin.registry:
                     p_mid_data = pcls.is_layer_supported(layer, obj)
                     if p_mid_data:
-                        plugin.update((p_mid_data, ))
+                        plugin.update((p_mid_data,))
 
                 data.update(plugin=plugin)
                 display.mid.plugin.update(plugin.keys())
@@ -117,7 +123,23 @@ def setup_pyramid(comp, config):
             bookmarkLayerId=obj.bookmark_resource_id,
             tinyDisplayUrl=request.route_url('webmap.display.tiny', id=obj.id),
             testEmbeddedMapUrl=request.route_url('webmap.display.shared.test', id=obj.id),
+            webmapId=obj.id,
+            webmapDescription=obj.description,
+            webmapTitle=obj.display_name,
+            webmapEditable=obj.editable,
+            drawOrderEnabled=obj.draw_order_enabled,
+            measurementSystem=request.env.core.settings_get('core', 'units')
         )
+
+        if comp.settings['annotation']:
+            config['annotations'] = dict(
+                enabled=obj.annotation_enabled,
+                default=obj.annotation_default,
+                scope=dict(
+                    read=obj.has_permission(WebMapScope.annotation_read, request.user),
+                    write=obj.has_permission(WebMapScope.annotation_write, request.user),
+                )
+            )
 
         return dict(
             obj=obj,
@@ -148,9 +170,12 @@ def setup_pyramid(comp, config):
 
     class DisplayMenu(DynItem):
         def build(self, args):
-            if isinstance(args.obj, WebMap):
-                yield Label('webmap', _("Web map"))
+            yield Label('webmap', _("Web map"))
 
+            if (
+                isinstance(args.obj, WebMap)
+                and args.obj.has_permission(WebMapScope.display, args.request.user)
+            ):
                 yield Link(
                     'webmap/display', _("Display"),
                     self._url())

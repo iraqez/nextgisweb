@@ -33,18 +33,19 @@
 			background-size: 16px 16px;
 
 			&.svgIcon{
-				&-raster_layer,
-				&-resource_group{
+				&-raster_layer{
 					width: 14px;
 					height: 14px;
 				}
 
-				&-vector_layer{
+				&-vector_layer,
+				&-resource_group{
 					width: 16px;
 					height: 16px;
 				}
 
-				&-basemap_layer{
+				&-basemap_layer,
+				&-lookup_table{
 					shape-rendering: crispEdges;
 				}
 			}
@@ -66,8 +67,8 @@
 		}
 
 		&-resource_group{
-			width: 	20px;
-			height: 20px;
+			width: 	24px;
+			height: 24px;
 		}
 
 		&-postgis_layer{

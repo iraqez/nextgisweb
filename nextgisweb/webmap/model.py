@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals, print_function, absolute_import
+import json
+
 from sqlalchemy.ext.orderinglist import ordering_list
+from sqlalchemy.types import TypeDecorator
+import geoalchemy2 as ga
 
 from .. import db
 from ..models import declarative_base
@@ -24,6 +28,8 @@ class WebMapScope(Scope):
     label = _("Web map")
 
     display = Permission(_("Display"))
+    annotation_read = Permission(_("View annotations"))
+    annotation_write = Permission(_("Edit annotations"))
 
 
 class WebMap(Base, Resource):
@@ -34,17 +40,24 @@ class WebMap(Base, Resource):
 
     root_item_id = db.Column(db.ForeignKey('webmap_item.id'), nullable=False)
     bookmark_resource_id = db.Column(db.ForeignKey(Resource.id), nullable=True)
+    draw_order_enabled = db.Column(db.Boolean, nullable=True)
+    editable = db.Column(db.Boolean, nullable=False, default=False)
 
     extent_left = db.Column(db.Float, default=-180)
     extent_right = db.Column(db.Float, default=+180)
     extent_bottom = db.Column(db.Float, default=-90)
     extent_top = db.Column(db.Float, default=+90)
 
+    annotation_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    annotation_default = db.Column(db.Boolean, nullable=False, default=False)
+
+    root_item = db.relationship('WebMapItem', cascade='all')
+
     bookmark_resource = db.relationship(
         Resource, foreign_keys=bookmark_resource_id,
         backref=db.backref('bookmarked_webmaps'))
 
-    root_item = db.relationship('WebMapItem', cascade='all')
+    annotations = db.relationship('WebMapAnnotation', cascade='all,delete-orphan')
 
     @classmethod
     def check_parent(cls, parent):
@@ -54,6 +67,7 @@ class WebMap(Base, Resource):
         return dict(
             id=self.id,
             display_name=self.display_name,
+            editable=self.editable,
             root_item=self.root_item.to_dict(),
             bookmark_resource_id=self.bookmark_resource_id,
             extent=(self.extent_left, self.extent_bottom,
@@ -73,7 +87,10 @@ class WebMap(Base, Resource):
 
         if 'extent' in data:
             self.extent_left, self.extent_bottom, \
-                self.extent_right, self.extent_top = data['extent']
+            self.extent_right, self.extent_top = data['extent']
+
+        if 'editable' in data:
+            self.editable = data['editable']
 
 
 class WebMapItem(Base):
@@ -91,6 +108,7 @@ class WebMapItem(Base):
     layer_min_scale_denom = db.Column(db.Float, nullable=True)
     layer_max_scale_denom = db.Column(db.Float, nullable=True)
     layer_adapter = db.Column(db.Unicode, nullable=True)
+    draw_order_position = db.Column(db.Integer, nullable=True)
 
     parent = db.relationship(
         'WebMapItem', remote_side=id, backref=db.backref(
@@ -133,6 +151,7 @@ class WebMapItem(Base):
                 layer_min_scale_denom=self.layer_min_scale_denom,
                 layer_max_scale_denom=self.layer_max_scale_denom,
                 layer_adapter=self.layer_adapter,
+                draw_order_position=self.draw_order_position,
             )
 
     def from_dict(self, data):
@@ -146,10 +165,38 @@ class WebMapItem(Base):
 
         for a in ('display_name', 'group_expanded', 'layer_enabled',
                   'layer_adapter', 'layer_style_id', 'layer_transparency',
-                  'layer_min_scale_denom', 'layer_max_scale_denom'):
+                  'layer_min_scale_denom', 'layer_max_scale_denom',
+                  'draw_order_position'):
 
             if a in data:
                 setattr(self, a, data[a])
+
+class JSONTextType(TypeDecorator):
+    """ SA type decorator for JSON stored as text """
+
+    impl = db.Unicode
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        return json.dumps(value)
+
+    def process_result_value(self, value, dialect):
+        if not value:
+            return None
+        return json.loads(value)    
+
+
+class WebMapAnnotation(Base):
+    __tablename__ = 'webmap_annotation'
+
+    id = db.Column(db.Integer, primary_key=True)
+    webmap_id = db.Column(db.ForeignKey(WebMap.id), nullable=False)
+    description = db.Column(db.Unicode)
+    style = db.Column(JSONTextType)
+    geom = db.Column(ga.Geometry(dimension=2, srid=3857), nullable=False)
+
+    webmap = db.relationship(WebMap)
 
 
 PR_READ = ResourceScope.read
@@ -178,6 +225,12 @@ class WebMapSerializer(Serializer):
     extent_right = SP(**_mdargs)
     extent_bottom = SP(**_mdargs)
     extent_top = SP(**_mdargs)
+
+    draw_order_enabled = SP(**_mdargs)
+    editable = SP(**_mdargs)
+
+    annotation_enabled = SP(**_mdargs)
+    annotation_default = SP(**_mdargs)
 
     bookmark_resource = SRR(**_mdargs)
 

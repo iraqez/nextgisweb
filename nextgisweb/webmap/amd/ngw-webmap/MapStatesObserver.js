@@ -31,7 +31,7 @@ define([
             }
 
             this._states[state] = {
-                control: control
+                control: control ? control : null
             };
 
             if (activate) {
@@ -48,11 +48,15 @@ define([
                 return false;
             }
 
-            if (this._currentState) {
-                this._states[this._currentState].control.deactivate();
+            if (this._currentState && this._currentState === state) return true;
 
+            if (this._currentState) {
+                var currentControl = this._states[this._currentState].control;
+                if (currentControl) currentControl.deactivate();
             }
-            this._states[state].control.activate();
+            
+            var stateControl = this._states[state].control;
+            if (stateControl)  stateControl.activate();
             this._currentState = state;
             return true;
         },
@@ -63,7 +67,9 @@ define([
                 return false;
             }
 
-            this._states[state].control.deactivate();
+            var stateControl = this._states[state].control;
+            if (stateControl) stateControl.deactivate();
+
             this._currentState = null;
             if (this._defaultState && this._defaultState !== state) {
                 this.activateState(this._defaultState);
@@ -76,6 +82,15 @@ define([
             if (activate) {
                 this.activateState(state);
             }
+        },
+
+        activateDefaultState: function () {
+            this.activateState(this._defaultState);
+        },
+
+        getActiveState: function () {
+            if (!this._currentState) return false;
+            return this._currentState;
         }
     }));
 });
